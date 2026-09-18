@@ -125,6 +125,19 @@ test('runtime is new enough for the INT8 graphs (>= 1.21)', (() => {
   return maj > 1 || (maj === 1 && min >= 21);
 })(), `v${banners[0]} — ConvInteger needs 1.21+`);
 
+// The runtime's own file names are referenced from js/core.js; a rename in one
+// place and not the other is a boot failure on a phone, which is expensive to
+// discover there.
+const coreSrc = readFileSync(join(ROOT, 'js/core.js'), 'utf8');
+const wanted = new Set();
+for (const m of coreSrc.matchAll(/base:\s*'([^']+)'/g)) { wanted.add(`${m[1]}.mjs`); wanted.add(`${m[1]}.wasm`); }
+for (const m of coreSrc.matchAll(/bundle:\s*'([^']+)'/g)) wanted.add(m[1]);
+const namedInManifest = new Set(runtimeFiles.flatMap(([_, meta]) => [meta.file]));
+const missingFiles = [...wanted].filter((f) => !existsSync(join(ROOT, 'vendor', f)));
+const unlisted = [...wanted].filter((f) => !namedInManifest.has(f));
+test('runtime files named in core.js exist', missingFiles.length === 0, missingFiles.join(', '));
+test('runtime files named in core.js are in the manifest', unlisted.length === 0, unlisted.join(', '));
+
 section('DOM contract');
 const appSrc = readFileSync(join(ROOT, 'js/app.js'), 'utf8') + readFileSync(join(ROOT, 'js/ui.js'), 'utf8');
 const referenced = new Set([
