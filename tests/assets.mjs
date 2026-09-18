@@ -93,7 +93,10 @@ test('model digests match models/manifest.json', hashMismatch.length === 0, hash
 
 section('DOM contract');
 const appSrc = readFileSync(join(ROOT, 'js/app.js'), 'utf8') + readFileSync(join(ROOT, 'js/ui.js'), 'utf8');
-const referenced = new Set([...appSrc.matchAll(/\$\('([\w-]+)'\)/g)].map((m) => m[1]));
+const referenced = new Set([
+  ...[...appSrc.matchAll(/\$\('([\w-]+)'\)/g)].map((m) => m[1]),
+  ...[...appSrc.matchAll(/bind\('([\w-]+)'/g)].map((m) => m[1])
+]);
 const htmlIds = new Set([...html.matchAll(/id="([\w-]+)"/g)].map((m) => m[1]));
 // install-btn and friends are injected by ui.js at runtime, so they are not in
 // the static HTML on purpose.
