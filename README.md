@@ -93,8 +93,32 @@ entirely with one button.
 
 ```bash
 node tools/serve.mjs          # http://localhost:8080
-npm test                      # 190 headless checks, no browser required
+npm test                      # 195 headless checks, no browser required
+npm run verify:models         # run the real models over a real photograph
 ```
+
+`npm install` also brings in the model verifier: `npm run verify:models` loads
+the shipped ONNX graphs on the same runtime the browser uses, checks their
+digests against `models/manifest.json`, pushes `tools/sample-bus.jpg` through
+detector, tracker, colour and material analysis, classifier, OCR, pose, fusion
+and the language layer, and prints what ARGUS saw field by field. That is how
+the following were caught — none of them are visible to a unit test:
+
+* the INT8 pose and hand graphs use `ConvInteger`, which the WASM execution
+  provider only implements from ONNX Runtime 1.21 onwards (the vendored runtime
+  is 1.30.0, and `models/manifest.json` records its digests)
+* the quantised pose graph is exported at a fixed 640 × 640, so feeding it 320
+  made every pose pass fail — the input size is now read from the graph
+* fitting the long side of a frame to the pose model's size produced a tensor
+  whose length did not match its declared shape; letterboxing is square now
+* the colour read called a beige coat black and a blue bus gunmetal, because
+  shadow, glass and highlight were counted as pigment; the colour now comes
+  from the mid-tones with a hue-preserving illuminant correction
+* material scoring called a person "foliage" and a bus "denim"; materials that
+  only make sense on certain subjects are now gated, and a weak cue match falls
+  back to what the knowledge base says the object is made of
+
+`verify:models` exits non-zero if any check fails, so it can gate a release.
 
 The dev server sends `Cross-Origin-Opener-Policy` and
 `Cross-Origin-Embedder-Policy` so the page is cross-origin isolated, which is

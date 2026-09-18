@@ -367,7 +367,7 @@ export class Pipeline {
       this.timers.pose = time;
       const people = records.filter((r) => r.category === 'person').map((r) => ({ id: r.id, box: r.box }));
       Promise.resolve()
-        .then(() => this.pose.detectBodies(frame, { size: 320, minScore: 0.35 }))
+        .then(() => this.pose.detectBodies(frame, { minScore: 0.35 }))
         .then((bodies) => {
           this.stats.poseRuns++;
           this.lastPoses = bodies.map((body) => {
@@ -482,7 +482,11 @@ export class Pipeline {
       'conveyor', 'belt', 'pallet', 'sink', 'hob', 'stove', 'dashboard', 'seat', 'tabletop'];
     const area = (b) => Math.max(1, (b[2] - b[0]) * (b[3] - b[1]));
     const frameArea = frame ? frame.width * frame.height : 1;
+    // A bus is big, but nothing rests on it. Only furniture, floors and the
+    // like can be a surface; a large vehicle, person or animal cannot.
+    const NOT_SURFACES = new Set(['vehicle', 'person', 'animal', 'insect', 'bird', 'sign', 'text', 'plant']);
     const surfaces = records.filter((r) => {
+      if (NOT_SURFACES.has((r.category || '').toLowerCase())) return false;
       const name = (r.noun || r.label || '').toLowerCase();
       const named = SURFACES.some((s) => name.includes(s));
       const big = area(r.box) > frameArea * 0.08;

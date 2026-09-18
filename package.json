@@ -1,15 +1,31 @@
 {
   "name": "argus",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
-  "description": "ARGUS — an on-device visual agent: detection, 1000-class recognition, text and brand reading, colour and material analysis, pose, memory and spoken answers, behind a heads-up display.",
+  "description": "ARGUS \u2014 an on-device visual agent: detection, 1000-class recognition, text and brand reading, colour and material analysis, pose, memory and spoken answers, behind a heads-up display.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "serve": "node tools/serve.mjs",
     "start": "node tools/serve.mjs",
-    "test": "node tests/run.mjs"
+    "test": "node tests/run.mjs",
+    "verify:models": "node tools/verify-models.mjs"
   },
-  "keywords": ["on-device", "vision", "onnx", "webgpu", "wasm", "accessibility", "hud", "pwa"]
+  "keywords": [
+    "on-device",
+    "vision",
+    "onnx",
+    "webgpu",
+    "wasm",
+    "accessibility",
+    "hud",
+    "pwa"
+  ],
+  "devDependencies": {
+    "jpeg-js": "^0.4.4",
+    "onnxruntime-web": "^1.30.0"
+  }
 }

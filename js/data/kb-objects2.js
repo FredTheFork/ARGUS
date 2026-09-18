@@ -9,7 +9,7 @@
  */
 
 export const OBJECTS_2 = `
-person|human,man,woman,child,people,pedestrian|person|skin,hair,fabric|skin,colour,dark|1.75|3|private|Pose is estimated per person when the pose module is loaded.
+person|human,man,woman,child,people,pedestrian|person|skin,hair,fabric|black,white,grey,beige,blue,brown|1.75|3|private|Pose is estimated per person when the pose module is loaded.
 driver|motorist|person|skin,fabric|skin|1.7|3|private
 cyclist|bike rider|person|skin,fabric,helmet|colour|1.7|3|
 child|kid,boy,girl,toddler|person|skin,fabric|skin|1.2|3|private

@@ -7,8 +7,8 @@
  * ImageNet head can name.
  */
 
-export const VERSION = '2.0.0';
-export const BUILD = 'ARGUS-2.0.0/vision-agent';
+export const VERSION = '2.0.1';
+export const BUILD = 'ARGUS-2.0.1/vision-agent';
 
 /* ------------------------------------------------------------------ *
  * Category taxonomy

@@ -101,3 +101,39 @@ export const CONDITIONS = [
   { id: 'leaking', words: ['leak', 'leaking', 'drip'], note: 'Leaks reach electrics faster than you expect.' },
   { id: 'smouldering', words: ['smoke', 'smoulder', 'burning', 'scorch'], note: 'Uncontrolled smoke: leave by the nearest exit and raise the alarm.' }
 ];
+
+/**
+ * MATERIAL_ALIASES — the object knowledge base and the material scorer do not
+ * have to use the same words.
+ *
+ * Object rows were written with natural material names ("cotton", "porcelain",
+ * "fur", "stainless", "card"), while the scorer measures a fixed vocabulary of
+ * 57 physical materials. Without this map, `materialsFor("duvet")` returns
+ * "cotton", no scored material ever matches it, and the prior silently does
+ * nothing. Tokens not listed here are left alone: for food and plant matter the
+ * honest answer is that the cue-based scorer has no opinion, and inventing one
+ * would put "bread" into a metal detector's answer.
+ */
+export const MATERIAL_ALIASES = {
+  cotton: 'fabric', linen: 'fabric', polyester: 'fabric', nylon: 'fabric', silk: 'silk',
+  fur: 'hair', bristle: 'hair', flesh: 'skin',
+  porcelain: 'ceramic', crystal: 'glass', beads: 'glass',
+  stainless: 'steel', 'carbon steel': 'steel', nonstick: 'metal', foil: 'aluminium',
+  acrylic: 'glossy plastic', cladding: 'composite',
+  latex: 'rubber', vinyl: 'faux leather',
+  resin: 'epoxy', graphite: 'carbon fibre',
+  varnish: 'varnished wood', laminate: 'veneer', cork: 'wood', bamboo: 'wood', wicker: 'wood',
+  card: 'cardboard', carton: 'cardboard',
+  granite: 'stone', slate: 'stone', sand: 'stone', masonry: 'brick', render: 'plaster',
+  chalk: 'plaster', clay: 'terracotta', fibreglass: 'composite', grp: 'composite', coir: 'canvas', felt: 'wool', sponge: 'foam',
+  leaf: 'foliage', leaves: 'foliage', grass: 'foliage', moss: 'foliage', stem: 'foliage',
+  root: 'foliage', seed: 'foliage', petal: 'foliage', floret: 'foliage', wing: 'feather',
+  liquid: 'water'
+};
+
+/** Resolve a knowledge-base material token to the scorer's vocabulary. */
+export function canonicalMaterial(token) {
+  const key = String(token || '').trim().toLowerCase();
+  if (!key) return '';
+  return MATERIAL_ALIASES[key] || key;
+}

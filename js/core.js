@@ -206,8 +206,27 @@ export class Session {
     this.meta = meta;
     this.inputs = session.inputNames;
     this.outputs = session.outputNames;
+    // Declared tensor shapes. Fixed-shape graphs (the quantised pose model is
+    // 640x640, the classifier 224x224) must be fed exactly what they ask for —
+    // asking the session beats hard-coding a size that a future re-export
+    // silently changes.
+    this.inputMetadata = session.inputMetadata || null;
+    this.outputMetadata = session.outputMetadata || null;
     this._queue = Promise.resolve();
     this.busy = false;
+  }
+
+  /**
+   * Square input size of the first input, or null when the height and width are
+   * dynamic. Dynamic graphs are free to be fed whatever the caller wants.
+   */
+  get fixedSize() {
+    const shape = this.inputMetadata?.[0]?.shape;
+    if (!shape || shape.length !== 4) return null;
+    const h = Number(shape[shape.length - 2]);
+    const w = Number(shape[shape.length - 1]);
+    if (!Number.isFinite(h) || !Number.isFinite(w) || h < 32 || w < 32) return null;
+    return Math.max(h, w);
   }
 
   get loadMs() { return this.meta.loadMs || 0; }
@@ -664,6 +683,20 @@ export function rgbToHsv(r, g, b) {
   }
   return [h, max === 0 ? 0 : d / max, max];
 }
+/**
+ * HSV back to RGB. Used by the colour path: an illuminant correction should
+ * move an object's hue without inflating its saturation, or a red mug in a
+ * scene that averages slightly red comes back brown.
+ */
+export function hsvToRgb(h, s, v) {
+  const hh = ((h % 360) + 360) % 360 / 60;
+  const c = v * s;
+  const x = c * (1 - Math.abs((hh % 2) - 1));
+  const m = v - c;
+  const seg = Math.floor(hh) % 6;
+  const rgb = [[c, x, 0], [x, c, 0], [0, c, x], [0, x, c], [x, 0, c], [c, 0, x]][seg] || [0, 0, 0];
+  return [(rgb[0] + m) * 255, (rgb[1] + m) * 255, (rgb[2] + m) * 255];
+}
 
 export const hexOf = (r, g, b) => `#${[r, g, b].map((v) => Math.max(0, Math.min(255, v | 0)).toString(16).padStart(2, '0')).join('')}`;
 
@@ -674,24 +707,36 @@ export const hexOf = (r, g, b) => `#${[r, g, b].map((v) => Math.max(0, Math.min(
 export function kmeansLab(samples, k = 4, iters = 8) {
   if (!samples.length) return [];
   const pts = samples.map((s) => s.lab);
-  let centres = [pts[Math.floor(Math.random() * pts.length)]];
+  // Deterministic seeding: the point closest to the mean first, then
+  // farthest-first from there. Math.random() here meant the same frame could
+  // read two different colours on two different runs — indefensible for a
+  // camera judged frame to frame, and impossible to test.
+  const mean = pts.reduce((a, p) => [a[0] + p[0], a[1] + p[1], a[2] + p[2]], [0, 0, 0]).map((v) => v / pts.length);
+  let first = 0;
+  let firstD = Infinity;
+  for (let i = 0; i < pts.length; i++) {
+    const d = dist2(pts[i], mean);
+    if (d < firstD) { firstD = d; first = i; }
+  }
+  let centres = [pts[first]];
   while (centres.length < Math.min(k, pts.length)) {
-    const d = pts.map((p) => Math.min(...centres.map((c) => dist2(p, c))));
-    const total = d.reduce((a, b) => a + b, 0);
-    if (total <= 0) break;
-    let r = Math.random() * total;
-    let pick = 0;
-    for (let i = 0; i < d.length; i++) { r -= d[i]; if (r <= 0) { pick = i; break; } }
+    let pick = -1;
+    let pickD = 0;
+    for (let i = 0; i < pts.length; i++) {
+      const d = Math.min(...centres.map((cc) => dist2(pts[i], cc)));
+      if (d > pickD) { pickD = d; pick = i; }
+    }
+    if (pick < 0) break;
     centres.push(pts[pick]);
   }
-  let assign = new Array(pts.length).fill(0);
+  const assign = new Array(pts.length).fill(0);
   for (let it = 0; it < iters; it++) {
     let moved = false;
     for (let i = 0; i < pts.length; i++) {
       let best = 0; let bestD = Infinity;
-      for (let c = 0; c < centres.length; c++) {
-        const d = dist2(pts[i], centres[c]);
-        if (d < bestD) { bestD = d; best = c; }
+      for (let ci = 0; ci < centres.length; ci++) {
+        const d = dist2(pts[i], centres[ci]);
+        if (d < bestD) { bestD = d; best = ci; }
       }
       if (assign[i] !== best) { assign[i] = best; moved = true; }
     }
@@ -705,11 +750,11 @@ export function kmeansLab(samples, k = 4, iters = 8) {
   }
   const counts = centres.map(() => 0);
   for (const a of assign) counts[a]++;
-  return centres.map((c, i) => ({
-    lab: c,
+  return centres.map((cc, i) => ({
+    lab: cc,
     weight: counts[i] / pts.length,
-    rgb: labToRgb(c[0], c[1], c[2])
-  })).filter((c) => c.weight > 0).sort((a, b) => b.weight - a.weight);
+    rgb: labToRgb(cc[0], cc[1], cc[2])
+  })).filter((cc) => cc.weight > 0).sort((a, b) => b.weight - a.weight);
 }
 
 function dist2(a, b) {

@@ -15,10 +15,10 @@
  */
 
 import {
-  toLuma, gradient, boxBlur, entropy, mean, std, rgbToLab, rgbToHsv, kmeansLab,
+  toLuma, gradient, boxBlur, entropy, mean, std, rgbToLab, rgbToHsv, hsvToRgb, kmeansLab,
   deltaE, clamp, boxArea, hexOf, fitSize
 } from './core.js';
-import { MATERIALS, FINISHES } from './data/kb-materials.js';
+import { MATERIALS, FINISHES, canonicalMaterial } from './data/kb-materials.js';
 import { nearestColour, coloursFor, materialsFor, lookup, familySwatch } from './kb.js';
 
 /* ------------------------------------------------------------------ *
@@ -126,7 +126,40 @@ function foregroundMask(img) {
  * Colour
  * ------------------------------------------------------------------ */
 
-function colourAnalysis(img, mask, { priors }) {
+/**
+ * Grey-world illuminant estimate from the whole frame.
+ *
+ * A camera in shade sees the world through a blue cast and in tungsten through
+ * an orange one; naming the colour of an object inside that cast names the
+ * light, not the object. Assuming the scene averages to grey — and refusing to
+ * when the frame is itself dominated by one saturated hue, which is the classic
+ * way grey-world goes wrong — recovers most of the true colour.
+ */
+function illuminantGains(frame) {
+  if (!frame || frame.width < 8) return null;
+  let r = 0; let g = 0; let b = 0; let sat = 0; let n = 0;
+  const step = Math.max(1, Math.floor(Math.min(frame.width, frame.height) / 64));
+  for (let y = 0; y < frame.height; y += step) {
+    for (let x = 0; x < frame.width; x += step) {
+      const i = (y * frame.width + x) * 4;
+      const R = frame.data[i]; const G = frame.data[i + 1]; const B = frame.data[i + 2];
+      r += R; g += G; b += B;
+      sat += rgbToHsv(R, G, B)[1];
+      n++;
+    }
+  }
+  if (!n) return null;
+  r /= n; g /= n; b /= n;
+  const mean = (r + g + b) / 3;
+  if (mean < 14) return null;                       // too dark to judge the light
+  if (sat / n > 0.46) return null;                  // the scene is genuinely colourful
+  const gains = [r, g, b].map((v) => clamp(mean / Math.max(1, v), 0.8, 1.25));
+  const spread = Math.max(...gains) / Math.min(...gains);
+  if (spread < 1.03) return null;                   // already neutral
+  return gains;
+}
+
+function colourAnalysis(img, mask, { priors, gains = null }) {
   const { width: w, height: h, data } = img;
   const samples = [];
   const cx = w / 2; const cy = h / 2;
@@ -136,7 +169,18 @@ function colourAnalysis(img, mask, { priors }) {
       const p = y * w + x;
       if (!mask[p]) continue;
       const i = p * 4;
-      const r = data[i]; const g = data[i + 1]; const b = data[i + 2];
+      let r = data[i]; let g = data[i + 1]; let b = data[i + 2];
+      if (gains) {
+        // Correction moves the hue only. Scaling the channels outright would
+        // also rescale saturation, and a scene that averages slightly red (a
+        // red mug on a grey desk) would come back with a brown mug.
+        const [h0, s0, v0] = rgbToHsv(r, g, b);
+        if (s0 > 0.04) {
+          const [h1] = rgbToHsv(r * gains[0], g * gains[1], b * gains[2]);
+          [r, g, b] = hsvToRgb(h1, s0, v0);
+        }
+      }
+      r = clamp(r, 0, 255); g = clamp(g, 0, 255); b = clamp(b, 0, 255);
       const lab = rgbToLab(r, g, b);
       // Centre weight: objects are framed centrally, so the middle counts twice.
       const weight = 1 + 0.6 * (1 - Math.hypot(x - cx, y - cy) / maxR);
@@ -145,9 +189,18 @@ function colourAnalysis(img, mask, { priors }) {
   }
   if (samples.length < 16) return null;
 
-  // Ignore near-black pixels for hue naming (shadow crushes hue) but keep them
-  // for the brightness read, which is how "matte black" survives.
-  const weighted = samples.map((s) => ({ lab: s.lab, rgb: s.rgb, weight: s.weight }));
+  // Shadows and specular highlights are light, not pigment. Trimming the
+  // darkest tenth and the brightest tail before naming the colour is what stops
+  // a beige coat reading as black trousers and a blue bus reading as its dark
+  // windows. The trim is capped: on a genuinely black or white object nearly
+  // every pixel is at that end, and refusing to trim keeps the honest answer.
+  const luma = samples.map((s) => 0.2126 * s.rgb[0] + 0.7152 * s.rgb[1] + 0.0722 * s.rgb[2]);
+  const order = [...luma].sort((a, b) => a - b);
+  const lowCut = order[Math.floor(order.length * 0.12)];
+  const highCut = order[Math.floor(order.length * 0.97)];
+  const trimmed = samples.filter((s, i) => luma[i] >= lowCut && luma[i] <= highCut);
+  const weighted = (trimmed.length >= Math.max(16, samples.length * 0.5) ? trimmed : samples)
+    .map((s) => ({ lab: s.lab, rgb: s.rgb, weight: s.weight }));
 
   const clusters = kmeansLab(weighted, 4, 7).map((c) => {
     const named = nearestColour(c.lab, { prefer: priors });
@@ -169,6 +222,18 @@ function colourAnalysis(img, mask, { priors }) {
   // black/charcoal flip-flop between frames.
   const sorted = [...clusters].sort((a, b) => b.weight - a.weight);
   let dominant = sorted[0];
+
+  // Paint beats glass and shadow. When the heaviest cluster is nearly neutral
+  // and another cluster is clearly saturated and nearly as large, the saturated
+  // one is the object's finish rather than what it is reflecting — this is what
+  // turns a blue bus with dark windows from "gunmetal" into "blue".
+  const chromaOf = (c) => Math.hypot(c.lab[1], c.lab[2]);
+  if (chromaOf(dominant) < 16) {
+    const colourful = sorted.find((c) => c.weight > dominant.weight * 0.72 && chromaOf(c) > 22);
+    if (colourful) dominant = colourful;
+  }
+
+  // A colour the knowledge base expects for this class wins a close vote.
   if (priors.length) {
     const priorHit = sorted.find((c) => priors.includes(c.name) && c.weight > dominant.weight * 0.6);
     if (priorHit) dominant = priorHit;
@@ -260,15 +325,62 @@ function cueProfile(img, mask) {
 const CUE_WEIGHTS = { specular: 2.2, texture: 1.4, edge: 1.1, saturation: 1.2, value: 0.9, warm: 0.8, green: 0.5 };
 
 /**
+ * Materials that only make sense on particular subjects.
+ *
+ * "Foliage, 61 percent" for a person is not a low-confidence answer, it is a
+ * wrong one — the scorer matched green-brown texture and ignored what it was
+ * looking at. Anything listed here must also match the object's name before it
+ * can be reported; everything else stays free to claim any object.
+ */
+const HOST_GATED = {
+  foliage: /plant|tree|leaf|hedge|shrub|flower|bush|grass|fern|moss|garden|vine|pot plant/,
+  skin: /person|hand|face|arm|head|leg|foot|finger|shoulder|knee|elbow|wrist|man|woman|child/,
+  hair: /person|head|hair|beard|dog|cat|fur|animal|man|woman|child/,
+  feather: /bird|duck|chicken|pigeon|wing|feather|duvet|pillow|quilt/,
+  'printed circuit': /circuit|board|electronics|motherboard|computer|laptop|phone|tablet|router|console|tv/,
+  water: /water|puddle|pool|liquid|pond|sea|lake|river|rain|bottle|glass of/,
+  asphalt: /road|path|street|tarmac|car park|driveway|pavement|kerb/,
+  brick: /wall|chimney|brick|building|house|paving|fireplace/,
+  marble: /marble|worktop|statue|counter|table|floor|tile/,
+  terracotta: /pot|planter|brick|tile|roof|chimney/,
+  rust: /metal|gate|pipe|fence|fitting|drum|tank|barrel|rail/,
+  foam: /sponge|seal|packaging|foam|mattress|pad|cushion|insulation/,
+  cardboard: /box|carton|package|packaging|cardboard|parcel/,
+  paper: /book|paper|note|poster|receipt|sign|document|magazine|label|letter|menu/,
+  mesh: /net|fence|sieve|vent|grate|speaker|radiator|basket|grill|screen|strainer/,
+  // The soft-goods family: without a host, a bus at 96 pixels has exactly the
+  // texture of denim. Clothing, furnishing and luggage are its real hosts.
+  fabric: /cloth|clothing|coat|jacket|shirt|trouser|jean|dress|skirt|jumper|cardigan|scarf|sock|shoe|boot|sneaker|trainer|glove|hat|cap|belt|wallet|bag|backpack|handbag|purse|suitcase|curtain|blinds|sofa|couch|armchair|chair|stool|bed|mattress|blanket|duvet|towel|cushion|pillow|umbrella|tent|awning|parasol|flag|banner|rug|carpet|linen|apron|tie|uniform|tablecloth|napkin|person|man|woman|child|clothes/,
+  denim: /jean|denim|trouser|jacket|shirt|bag|backpack|person|man|woman|child|clothing/,
+  canvas: /bag|backpack|tent|cover|tarp|sail|awning|parasol|shoe|sneaker|trainer|hat|sign|banner|flag/,
+  wool: /jumper|cardigan|scarf|sock|blanket|hat|coat|mitten|person|man|woman|child|clothing/,
+  silk: /dress|blouse|tie|scarf|curtain|pillow|cushion|clothing/,
+  velvet: /sofa|couch|curtain|dress|cushion|cushion cover|chair|cloth/,
+  leather: /wallet|bag|handbag|purse|shoe|boot|belt|sofa|couch|chair|glove|jacket|suitcase|case/,
+  'faux leather': /sofa|couch|bag|chair|case|jacket|bench|stool/,
+  'lcd screen': /phone|telephone|tv|television|monitor|laptop|tablet|display|screen|kiosk|atm|console/,
+  tile: /tile|floor|wall|bathroom|kitchen|splashback|roof|pool/
+};
+
+/**
  * Score every material against the measured cues plus the class prior. The
  * exp(-d²) form keeps scores in 0-1 and lets a prior lift a physically plausible
  * answer over a marginal cue difference without ever inventing evidence.
  */
 export function scoreMaterials(cues, cls) {
   if (!cues) return [];
-  const priors = materialsFor(cls).map((m) => m.toLowerCase());
-  const rows = MATERIALS.map((row) => {
-    const [name, adjectives, spec, tex, edge, sat, val, hue] = row.split('|');
+  const priors = materialsFor(cls).map((m) => canonicalMaterial(m)).filter(Boolean);
+  const host = String(cls || '').toLowerCase();
+  const rows = [];
+  MATERIALS.forEach((row) => {
+    const [name, adjectives, spec, tex, edge, sat, val, hue, hosts] = row.split('|');
+    const base = name.toLowerCase();
+    const prior = priors.some((p) => base.includes(p) || p.includes(base));
+    const gate = HOST_GATED[base];
+    // A gated material is only a candidate when this object is one of its
+    // hosts — unless the knowledge base itself lists it for this class, which
+    // is the user's own knowledge taking precedence over the heuristic.
+    if (gate && !prior && !gate.test(host)) return;
     const profile = {
       specular: Number(spec), texture: Number(tex), edge: Number(edge),
       saturation: Number(sat), value: Number(val)
@@ -281,13 +393,15 @@ export function scoreMaterials(cues, cls) {
       wsum += weight;
     }
     let score = Math.exp(-d / (wsum * 0.055));
-    const base = name.toLowerCase();
-    if (priors.some((p) => base.includes(p) || p.includes(base))) score += 0.28;
+    if (prior) score += 0.28;
+    // The row's own class hints are a second, weaker vote — "tyre, sole, mat"
+    // for rubber — and they only ever help.
+    if (hosts && hosts.split(',').some((h) => host && host.includes(h.trim()))) score += 0.1;
     if (hue === 'warm' && cues.warm > 0.62) score += 0.03;
     if (hue === 'cool' && cues.warm < 0.42) score += 0.03;
     if (hue === 'dark' && cues.value > 0.45) score -= 0.06;
     if (hue === 'green' && cues.green > 0.62) score += 0.05;
-    return { name, adjectives: adjectives ? adjectives.split(',').map((s) => s.trim()) : [], score: clamp(score, 0, 0.99) };
+    rows.push({ name, adjectives: adjectives ? adjectives.split(',').map((s) => s.trim()) : [], score: clamp(score, 0, 0.99) });
   });
   return rows.filter((r) => r.name !== 'unknown').sort((a, b) => b.score - a.score);
 }
@@ -549,17 +663,31 @@ export function analyseAppearance(frame, box, { cls = '', maxSize = 96 } = {}) {
   const small = downscale(crop, maxSize);
   const { mask, coverage, fallback } = foregroundMask(small);
   const priors = coloursFor(cls);
-  const colour = colourAnalysis(small, mask, { priors });
+  const gains = illuminantGains(frame);
+  const colour = colourAnalysis(small, mask, { priors, gains });
   const cues = cueProfile(small, mask);
   const materials = scoreMaterials(cues, cls);
   const pattern = patternAnalysis(small, mask, colour);
   const finish = FINISHES.find((f) => (cues?.specular ?? 0) >= f.min)?.word || 'matte';
   const shape = shapeOf(box, mask, small);
 
+  // Below this the cue match is noise. Rather than report the winner — which is
+  // how "foliage" reaches a description of a person — take the material the
+  // knowledge base knows this class is made of, marked as a prior so the spoken
+  // register can hedge ("probably metal").
+  const MATERIAL_FLOOR = 0.34;
+  const kbMaterial = canonicalMaterial(materialsFor(cls)[0]) || null;
+  let material = materials[0] ? { name: materials[0].name, confidence: materials[0].score } : null;
+  if (!material || material.confidence < MATERIAL_FLOOR) {
+    material = kbMaterial
+      ? { name: kbMaterial.toLowerCase(), confidence: 0.3, prior: true }
+      : { name: 'unknown', confidence: material?.confidence || 0, prior: true };
+  }
+
   return {
     colour,
     materials: materials.slice(0, 4),
-    material: materials[0] ? { name: materials[0].name, confidence: materials[0].score } : null,
+    material,
     finish,
     pattern,
     shape,

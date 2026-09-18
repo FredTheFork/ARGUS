@@ -71,8 +71,11 @@ export class Pose {
     if (this.body) return this.body;
     this.body = await this.runtime.session(BODY_URL, { verify: true, label: 'BODY POSE MODEL', onProgress });
     this.bodyReady = true;
-    await this.body.warmup([1, 3, 320, 320]);
-    this.onLog('pose online — 17-keypoint body tracking');
+    // The quantised graph is exported at a fixed square size; read it rather
+    // than assuming one, and warm the graph at that exact shape.
+    this.bodySize = this.body.fixedSize || 320;
+    await this.body.warmup([1, 3, this.bodySize, this.bodySize]);
+    this.onLog(`pose online — 17-keypoint body tracking at ${this.bodySize}px`);
     return this.body;
   }
 
@@ -80,7 +83,9 @@ export class Pose {
     if (this.hand) return this.hand;
     this.hand = await this.runtime.session(HAND_URL, { verify: true, label: 'HAND MODEL', onProgress });
     this.handReady = true;
-    this.onLog('hands online — 21-keypoint gesture tracking');
+    this.handSize = this.hand.fixedSize || 224;
+    await this.hand.warmup([1, 3, this.handSize, this.handSize]);
+    this.onLog(`hands online — 21-keypoint gesture tracking at ${this.handSize}px`);
     return this.hand;
   }
 
@@ -88,8 +93,9 @@ export class Pose {
    * Body
    * ---------------------------------------------------------------- */
 
-  async detectBodies(img, { size = 320, minScore = 0.35, maxPeople = 8 } = {}) {
+  async detectBodies(img, { size = null, minScore = 0.35, maxPeople = 8 } = {}) {
     if (!this.bodyReady) return [];
+    size = size || this.bodySize || 320;
     const started = performance.now();
     const size32 = Math.max(256, Math.round(size / 32) * 32);
     const { canvas, padW, padH, scale } = this._letterbox(img, size32);
@@ -116,11 +122,12 @@ export class Pose {
         const c = at(a, 7 + k * 3);
         kpts.push({ x, y, c, name: KEYPOINTS[k] || `kp${k}` });
       }
+      const box = [(cx - bw / 2 - padW) / scale, (cy - bh / 2 - padH) / scale, (cx + bw / 2 - padW) / scale, (cy + bh / 2 - padH) / scale];
       people.push({
         score,
-        box: [(cx - bw / 2 - padW) / scale, (cy - bh / 2 - padH) / scale, (cx + bw / 2 - padW) / scale, (cy + bh / 2 - padH) / scale],
+        box,
         kpts,
-        posture: postureOf(kpts),
+        posture: postureOf(kpts, box),
         activity: null
       });
     }
@@ -164,7 +171,7 @@ export class Pose {
         const src = ((y + row) * img.width + x) * 4;
         crop.data.set(img.data.subarray(src, src + w * 4), row * w * 4);
       }
-      const dets = await this._handsIn(crop, { minScore, size: 224 });
+      const dets = await this._handsIn(crop, { minScore, size: this.handSize || 224 });
       for (const d of dets) {
         out.push({
           ...d,
@@ -216,13 +223,20 @@ export class Pose {
     return hands;
   }
 
+  /**
+   * Letterbox to a SQUARE canvas of exactly `size`.
+   *
+   * Both pose graphs are exported at a fixed square input, so the tensor must
+   * be size x size whatever the frame's aspect ratio — fitting the long side to
+   * `size` and let the short side exceed it produces a tensor whose length does
+   * not match its declared dims (ORT rejects it outright).
+   */
   _letterbox(img, size) {
-    const fit = fitSize(img.width, img.height, size, 'max');
-    const w = Math.max(32, Math.round(fit.w / 32) * 32);
-    const h = Math.max(32, Math.round(fit.h / 32) * 32);
+    const w = Math.max(32, Math.round(size / 32) * 32);
+    const h = w;
     const scale = Math.min(w / img.width, h / img.height);
-    const nw = Math.round(img.width * scale);
-    const nh = Math.round(img.height * scale);
+    const nw = Math.max(1, Math.min(w, Math.round(img.width * scale)));
+    const nh = Math.max(1, Math.min(h, Math.round(img.height * scale)));
     const padW = Math.floor((w - nw) / 2);
     const padH = Math.floor((h - nh) / 2);
     const c = this.stage;
@@ -236,7 +250,7 @@ export class Pose {
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(src, padW, padH, nw, nh);
-    return { canvas: ctx.getImageData(0, 0, w, h), padW, padH, scale };
+    return { canvas: ctx.getImageData(0, 0, w, h), padW, padH, scale, w, h };
   }
 
   info() {
@@ -255,24 +269,60 @@ export class Pose {
 
 const kp = (kpts, name) => kpts.find((k) => k.name === name && k.c > 0.25);
 
-export function postureOf(kpts) {
-  const lh = kp(kpts, 'left hip'); const rh = kp(kpts, 'right hip');
-  const lk = kp(kpts, 'left knee'); const rk = kp(kpts, 'right knee');
-  const la = kp(kpts, 'left ankle'); const ra = kp(kpts, 'right ankle');
-  const ls = kp(kpts, 'left shoulder'); const rs = kp(kpts, 'right shoulder');
-  if (!ls || !rs) return 'unknown';
-  const shoulderY = (ls.y + rs.y) / 2;
-  const hipY = lh && rh ? (lh.y + rh.y) / 2 : null;
-  const kneeY = lk && rk ? (lk.y + rk.y) / 2 : null;
-  const ankleY = la && ra ? (la.y + ra.y) / 2 : null;
-  if (ankleY && shoulderY && Math.abs(ankleY - shoulderY) < Math.abs((ankleY - shoulderY) * 0.05)) return 'lying';
-  if (hipY && kneeY && hipY > kneeY) return 'upright';
-  const torso = hipY ? Math.abs(hipY - shoulderY) : 0;
-  const legVisible = ankleY && hipY ? Math.abs(ankleY - hipY) : 0;
-  if (hipY && ankleY && legVisible < torso * 1.6) return 'sitting';
-  if (hipY && torso < 0.06 * (kpts.length ? 1 : 1) && legVisible > 0) return 'crouching';
-  if (ankleY && hipY && legVisible >= torso * 1.6) return 'standing';
-  return hipY ? 'standing' : 'unknown';
+/**
+ * Posture from confident keypoints only.
+ *
+ * The previous version read a knee above a hip as "upright" (a string nothing
+ * else understood) and called anyone whose ankles were cropped or low-confidence
+ * "sitting", which is most people in a street scene. This version ignores
+ * keypoints below the confidence floor, uses the y-ordering that actually holds
+ * for each posture, and falls back on the shape of the box — a standing person
+ * is tall and thin, a seated one is not.
+ */
+export function postureOf(kpts, box = null) {
+  if (!kpts?.length) return 'unknown';
+  const pick = (name) => {
+    const k = kp(kpts, name);
+    return k && (k.c ?? 1) >= 0.35 ? k : null;
+  };
+  const mid = (a, b) => {
+    if (a && b) return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    return a || b || null;
+  };
+  const shoulder = mid(pick('left shoulder'), pick('right shoulder'));
+  const hip = mid(pick('left hip'), pick('right hip'));
+  const knee = mid(pick('left knee'), pick('right knee'));
+  const ankle = mid(pick('left ankle'), pick('right ankle'));
+  if (!shoulder && !hip) return 'unknown';
+
+  const boxH = box ? Math.abs(box[3] - box[1]) : 0;
+  const boxW = box ? Math.abs(box[2] - box[0]) : 0;
+  const slender = boxH && boxW ? boxH / boxW : 0;
+
+  // Torso horizontal (and not just a wide box): lying down.
+  if (shoulder && hip) {
+    const dx = Math.abs(shoulder.x - hip.x);
+    const dy = Math.abs(shoulder.y - hip.y);
+    if (dy > 2 && dx > dy * 1.6 && (!slender || slender < 1.5)) return 'lying';
+  }
+
+  if (hip && knee) {
+    const thighDown = knee.y > hip.y + 4;            // knees below hips
+    const shinDown = ankle ? ankle.y > knee.y + 4 : null;
+    if (!thighDown) {
+      // Knees at or above hip height: the leg is folded. Seated when the shins
+      // drop again or the whole box is squat, crouching when they do not.
+      if (shinDown) return 'sitting';
+      if (slender && slender < 1.6) return 'sitting';
+      return 'crouching';
+    }
+    if (shinDown === false) return slender && slender < 1.8 ? 'sitting' : 'crouching';
+    return 'standing';
+  }
+
+  // Legs not visible: a tall, narrow box is a standing person seen straight on.
+  if (slender) return slender < 1.45 ? 'sitting' : 'standing';
+  return 'standing';
 }
 
 /**

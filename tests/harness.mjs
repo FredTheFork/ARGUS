@@ -80,10 +80,23 @@ class Canvas {
     this._d = new Uint8ClampedArray(Math.max(1, w) * Math.max(1, h) * 4);
     this._ctx = new Ctx(this);
   }
+  // Real canvas semantics: assigning width/height reallocates and clears the
+  // bitmap. Getting this wrong silently truncates any image larger than the
+  // default 300x150, which is exactly what a 1080p photograph is.
   get width() { return this._w; }
-  set width(v) { this._w = v | 0; }
+  set width(v) {
+    const w = Math.max(1, v | 0);
+    if (w === this._w) return;
+    this._w = w;
+    this._d = new Uint8ClampedArray(this._w * this._h * 4);
+  }
   get height() { return this._h; }
-  set height(v) { this._h = v | 0; }
+  set height(v) {
+    const hgt = Math.max(1, v | 0);
+    if (hgt === this._h) return;
+    this._h = hgt;
+    this._d = new Uint8ClampedArray(this._w * this._h * 4);
+  }
   getContext() { return this._ctx; }
   toDataURL() { return 'data:image/png;base64,'; }
   addEventListener() {}

@@ -13,7 +13,7 @@
  * export is dynamic.
  */
 
-import { Runtime, fitSize, toTensor, nms, resizeImageData, iou, boxArea } from './core.js';
+import { Runtime, fitSize, toTensor, nms, resizeImageData, iou, boxArea, clamp } from './core.js';
 import { CLASSES } from './config.js';
 
 const MODEL_URL = 'models/yolov8n.onnx';
@@ -165,7 +165,7 @@ export class Detector {
    * Decode the YOLOv8 head. Accepts both channel-first and channel-last exports
    * and maps boxes from letterbox space back to source pixels.
    */
-  _decode(tensor, { w, h, padW, padH, scale, minScore }) {
+  _decode(tensor, { w, h, padW, padH, scale, minScore, srcW = Infinity, srcH = Infinity }) {
     const { data, dims } = tensor;
     const channelFirst = dims[1] < dims[2];
     const channels = channelFirst ? dims[1] : dims[2];
@@ -188,6 +188,14 @@ export class Detector {
         (cx + bw / 2 - padW) / scale,
         (cy + bh / 2 - padH) / scale
       ];
+      // A detector will happily predict a box that runs off the edge of the
+      // frame; every consumer downstream (crops, ranges, the HUD) wants
+      // coordinates inside the image, so clamp here rather than in ten places.
+      box[0] = clamp(box[0], 0, srcW);
+      box[1] = clamp(box[1], 0, srcH);
+      box[2] = clamp(box[2], 0, srcW);
+      box[3] = clamp(box[3], 0, srcH);
+      if (box[2] - box[0] < 2 || box[3] - box[1] < 2) continue;
       results.push({
         box,
         score: bestScore,

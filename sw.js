@@ -20,7 +20,7 @@
  *      (message type 'argus-purge') once the runtime has proved it unusable.
  */
 
-const VERSION = 'argus-2.0.0';   // bump to force a full re-cache on the next launch
+const VERSION = 'argus-2.0.1';   // bump to force a full re-cache on the next launch
 const CORE = `${VERSION}-core`;
 const RUNTIME = `${VERSION}-runtime`;
 const MODELS = `${VERSION}-models`;

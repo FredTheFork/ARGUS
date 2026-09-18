@@ -74,5 +74,42 @@
       "sha256": "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c",
       "mb": 0.56
     }
+  },
+  "runtime": {
+    "name": "onnxruntime-web",
+    "version": "1.30.0",
+    "bundles": {
+      "wasm": {
+        "file": "ort.min.js",
+        "bytes": 368025,
+        "sha256": "7ae472a8ec976bcb69ad46b89b0a6ec8f3c5dbea4477674a26958672d1f3322d"
+      },
+      "webgpu": {
+        "file": "ort.webgpu.min.js",
+        "bytes": 66417,
+        "sha256": "7d65dad7eb4564ad98db9924a259af2e2c68ebfbdbf254fa5d728f1c5736e07a"
+      },
+      "wasmLoader": {
+        "file": "ort-wasm-simd-threaded.mjs",
+        "bytes": 24381,
+        "sha256": "e13f7f94fc51b4ca72b12faeb1ee95f4ace6dfbc8939bc718aabdc0a27c4299b"
+      },
+      "wasmBinary": {
+        "file": "ort-wasm-simd-threaded.wasm",
+        "bytes": 14239897,
+        "sha256": "3398c10d07d229bd91b364548e130e0e51a8e5704b88c7c083ebbeb78842dee2"
+      },
+      "webgpuLoader": {
+        "file": "ort-wasm-simd-threaded.jsep.mjs",
+        "bytes": 46851,
+        "sha256": "709853412fd1ffc34247af1e73569227b5b79629c5ca3f59cc39cf7e500e4947"
+      },
+      "webgpuBinary": {
+        "file": "ort-wasm-simd-threaded.jsep.wasm",
+        "bytes": 28312028,
+        "sha256": "3ad23231b5bd6d9dda55a7f84606315e0bf35b6750c28ee993c987c54cacab0f"
+      }
+    },
+    "note": "Vendored so the app works offline with no CDN. INT8 pose and hand graphs use ConvInteger, which the WASM execution provider only implements from version 1.21 onwards \u2014 do not downgrade without re-quantising those two models."
   }
 }

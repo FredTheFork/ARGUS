@@ -91,6 +91,40 @@ for (const [key, m] of modelEntries) {
 }
 test('model digests match models/manifest.json', hashMismatch.length === 0, hashMismatch.join(', '));
 
+section('vendored runtime');
+// The app ships ONNX Runtime itself, so the runtime is a dependency like any
+// other file we are responsible for: same digests, same version, and old enough
+// to run the models it is asked to run.
+const runtime = modelManifest?.runtime;
+const runtimeFiles = Object.entries(runtime?.bundles || {});
+test('manifest describes the runtime', runtimeFiles.length >= 4, runtime ? `${runtime.name} ${runtime.version}, ${runtimeFiles.length} files` : 'missing');
+
+const runtimeProblems = [];
+for (const [key, meta] of runtimeFiles) {
+  const file = join(ROOT, 'vendor', meta.file);
+  if (!existsSync(file)) { runtimeProblems.push(`${key}: missing`); continue; }
+  const bytes = readFileSync(file);
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  if (bytes.length !== meta.bytes) runtimeProblems.push(`${key}: ${bytes.length} bytes, manifest says ${meta.bytes}`);
+  if (digest !== meta.sha256) runtimeProblems.push(`${key}: digest ${digest.slice(0, 10)} != ${String(meta.sha256).slice(0, 10)}`);
+  if (/Binary$/.test(key) && !(bytes[0] === 0x00 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6d)) {
+    runtimeProblems.push(`${key}: not a WebAssembly module`);
+  }
+}
+test('every runtime file matches the manifest', runtimeProblems.length === 0, runtimeProblems.join('; '));
+
+const banners = ['ort.min.js', 'ort.webgpu.min.js'].map((f) => {
+  const head = readFileSync(join(ROOT, 'vendor', f), 'utf8').slice(0, 200);
+  const m = head.match(/ONNX Runtime Web v([\d.]+)/);
+  return m ? m[1] : null;
+});
+test('both bundles report the same version', banners[0] && banners[0] === banners[1], banners.join(' / '));
+test('bundle version matches the manifest', banners[0] === runtime?.version, `${banners[0]} vs ${runtime?.version}`);
+test('runtime is new enough for the INT8 graphs (>= 1.21)', (() => {
+  const [maj, min] = String(banners[0] || '0.0').split('.').map(Number);
+  return maj > 1 || (maj === 1 && min >= 21);
+})(), `v${banners[0]} — ConvInteger needs 1.21+`);
+
 section('DOM contract');
 const appSrc = readFileSync(join(ROOT, 'js/app.js'), 'utf8') + readFileSync(join(ROOT, 'js/ui.js'), 'utf8');
 const referenced = new Set([
