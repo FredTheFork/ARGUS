@@ -69,7 +69,7 @@ export class Pose {
 
   async loadBody({ onProgress = () => {} } = {}) {
     if (this.body) return this.body;
-    this.body = await this.runtime.session(BODY_URL, { label: 'BODY POSE MODEL', onProgress });
+    this.body = await this.runtime.session(BODY_URL, { verify: true, label: 'BODY POSE MODEL', onProgress });
     this.bodyReady = true;
     await this.body.warmup([1, 3, 320, 320]);
     this.onLog('pose online — 17-keypoint body tracking');
@@ -78,7 +78,7 @@ export class Pose {
 
   async loadHand({ onProgress = () => {} } = {}) {
     if (this.hand) return this.hand;
-    this.hand = await this.runtime.session(HAND_URL, { label: 'HAND MODEL', onProgress });
+    this.hand = await this.runtime.session(HAND_URL, { verify: true, label: 'HAND MODEL', onProgress });
     this.handReady = true;
     this.onLog('hands online — 21-keypoint gesture tracking');
     return this.hand;

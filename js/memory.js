@@ -20,6 +20,45 @@ import { lookup, categoryOf, tierOf } from './kb.js';
 
 const MAX_TIMELINE = 400;
 const MAX_HISTORY = 600;
+const MAX_CENTROIDS = 250;
+
+/**
+ * Appearance centroids are stored as int8 with one float scale: 1280 floats per
+ * object would blow a 5 MB localStorage quota after a few hundred sightings,
+ * while 1280 bytes plus a scale keeps the whole memory under a megabyte and
+ * still separates objects comfortably (cosine similarity is unaffected by
+ * quantisation at this precision).
+ */
+function encodeEmbedding(vec) {
+  if (!vec || !vec.length) return null;
+  let scale = 0;
+  for (const v of vec) scale = Math.max(scale, Math.abs(v));
+  if (scale === 0) return null;
+  const q = new Int8Array(vec.length);
+  for (let i = 0; i < vec.length; i++) q[i] = Math.max(-127, Math.min(127, Math.round((vec[i] / scale) * 127)));
+  let bin = '';
+  const chunk = 4096;
+  // btoa is Latin-1 only, so the signed bytes are folded to 0-255 on the way in
+  // and unfolded on the way out.
+  for (let i = 0; i < q.length; i += chunk) {
+    const part = q.subarray(i, i + chunk);
+    let s = '';
+    for (let j = 0; j < part.length; j++) s += String.fromCharCode(part[j] & 0xff);
+    bin += s;
+  }
+  return { s: scale, q: btoa(bin) };
+}
+
+function decodeEmbedding(enc) {
+  if (!enc || !enc.q) return null;
+  const bin = atob(enc.q);
+  const out = new Float32Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    const b = bin.charCodeAt(i);
+    out[i] = ((b > 127 ? b - 256 : b) / 127) * enc.s;
+  }
+  return out;
+}
 
 export class Memory {
   constructor({ onLog = () => {} } = {}) {
@@ -106,10 +145,26 @@ export class Memory {
       lastSeen: t,
       sessions: 0,
       colours: {},
-      materials: {}
+      materials: {},
+      centroid: null,
+      centroidSamples: 0
     };
     entry.count++;
     entry.lastSeen = t;
+    if (record.embeddingVec) {
+      const vec = record.embeddingVec;
+      if (!entry.centroid) {
+        entry.centroid = encodeEmbedding(vec);
+        entry.centroidSamples = 1;
+      } else {
+        const old = decodeEmbedding(entry.centroid);
+        const n = entry.centroidSamples || 1;
+        const blended = new Float32Array(vec.length);
+        for (let i = 0; i < vec.length; i++) blended[i] = (old[i] * n + vec[i]) / (n + 1);
+        entry.centroid = encodeEmbedding(blended);
+        entry.centroidSamples = n + 1;
+      }
+    }
     entry.tier = Math.max(entry.tier || 1, record.tier || 1);
     if (record.attributes?.colour?.name) {
       const c = record.attributes.colour.name;
@@ -134,6 +189,7 @@ export class Memory {
       this.hazards.push({ label, kind: record.hazard.kind, note: record.hazard.note, t });
       this.addTimeline({ kind: 'hazard', text: `Hazard: ${label} — ${record.hazard.note || record.hazard.kind}`, label, t });
     }
+    if (entry.centroid && this.history.size % 25 === 0) this._pruneCentroids();
     this.save();
     return { novel, returning: !novel && entry.sessions <= 1 };
   }
@@ -221,6 +277,51 @@ export class Memory {
       this.save({ force: true });
     }
     return removed;
+  }
+
+  /* --- similarity ---------------------------------------------------- */
+
+  /**
+   * Which things I have seen before look like this?
+   *
+   * This is the difference between "the detector says phone" and "this is the
+   * phone I logged nine times, last seen at 14:02" — it matches the object's
+   * current appearance fingerprint against every remembered object, so the
+   * assistant recognises its own history rather than only repeating labels.
+   */
+  findSimilar(embedding, { minScore = 0.74, limit = 3, exclude = null } = {}) {
+    if (!embedding || !this.history.size) return [];
+    let scale = 0;
+    for (const v of embedding) scale = Math.max(scale, Math.abs(v));
+    if (!scale) return [];
+    const norm = Array.from(embedding, (v) => v / scale);
+    const hits = [];
+    for (const entry of this.history.values()) {
+      if (!entry.centroid || entry.label === exclude) continue;
+      const other = decodeEmbedding(entry.centroid);
+      if (!other) continue;
+      let dot = 0; let na = 0; let nb = 0;
+      const step = Math.max(1, Math.floor(norm.length / 256));
+      for (let i = 0; i < norm.length; i += step) {
+        dot += norm[i] * other[i];
+        na += norm[i] * norm[i];
+        nb += other[i] * other[i];
+      }
+      const score = dot / Math.sqrt(Math.max(1e-6, na * nb));
+      if (score >= minScore) hits.push({ label: entry.label, category: entry.category, count: entry.count, lastSeen: entry.lastSeen, score });
+    }
+    hits.sort((a, b) => b.score - a.score);
+    return hits.slice(0, limit);
+  }
+
+  /** Keep the centroid store bounded without losing frequently used entries. */
+  _pruneCentroids() {
+    const withCentroids = [...this.history.values()].filter((e) => e.centroid);
+    if (withCentroids.length <= MAX_CENTROIDS) return;
+    const stale = withCentroids
+      .sort((a, b) => (a.lastSeen * 0.6 + a.count) - (b.lastSeen * 0.6 + b.count))
+      .slice(0, withCentroids.length - MAX_CENTROIDS);
+    for (const entry of stale) delete entry.centroid;
   }
 
   /* --- queries ------------------------------------------------------- */

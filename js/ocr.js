@@ -52,9 +52,9 @@ export class Ocr {
   async load({ onProgress = () => {}, orientation = true } = {}) {
     if (this.det && this.rec) return true;
     const ep = this.runtime.tier === 'webgpu' ? ['wasm'] : null;
-    this.det = await this.runtime.session(DET_URL, { label: 'OCR TEXT DETECTOR', ep, onProgress });
-    this.rec = await this.runtime.session(REC_URL, { label: 'OCR RECOGNISER', ep, onProgress });
-    if (orientation) this.cls = await this.runtime.session(CLS_URL, { label: 'OCR ORIENTATION', ep, onProgress });
+    this.det = await this.runtime.session(DET_URL, { verify: true, label: 'OCR TEXT DETECTOR', ep, onProgress });
+    this.rec = await this.runtime.session(REC_URL, { verify: true, label: 'OCR RECOGNISER', ep, onProgress });
+    if (orientation) this.cls = await this.runtime.session(CLS_URL, { verify: true, label: 'OCR ORIENTATION', ep, onProgress });
     this.ready = true;
     this.onLog('OCR online — PP-OCRv4 detection + recognition');
     return true;

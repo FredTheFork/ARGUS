@@ -224,7 +224,20 @@ export const LINES = {
   readOut: ['Reading: {text}.'],
   movement: ['{Name} moving {direction}.'],
   distanceReport: ['{Name} is about {distance} away.'],
-  conditionFound: ['{Name} looks {condition}. {note}']
+  conditionFound: ['{Name} looks {condition}. {note}'],
+  // guided search
+  findStart: ['Looking for {term}. I will guide you.', 'Searching for {term}. Turn slowly.'],
+  findCentred: ['{Name} is dead ahead{range}.'],
+  findTurn: ['{Name}{range} — turn {direction}.'],
+  findClosing: ['{Name} getting closer{range}.'],
+  findReceding: ['{Name} drifting away — look back.'],
+  findWait: ['Still looking for {term}. Sweep slowly left to right.'],
+  findStop: ['Stopped looking for {term}.'],
+  findFound: ['Found {term}{range}.'],
+  // relations
+  onSurface: ['On the {surface}: {items}.'],
+  onSurfaceEmpty: ['Nothing on the {surface}.'],
+  partOf: ['{Name} is on the {on}.']
 };
 
 /* ------------------------------------------------------------------ *

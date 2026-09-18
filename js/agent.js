@@ -78,7 +78,7 @@ export function shortLabel(record) {
 const INTENTS = [
   { id: 'colour', re: /\b(what )?colou?r( is| of|s)?\b/i, term: true },
   { id: 'material', re: /\b(what('| i)?s it made (of|from)|what material|material|composition|made of)\b/i, term: true },
-  { id: 'where', re: /\b(where(\s|'|’)?(is|are|s|i)?\b|locate|find|position of|which way)/i, term: true },
+  { id: 'where', re: /\b(where(\s|'|’)?(is|are|s|i)?\b|locate|position of|which way)/i, term: true },
   { id: 'distance', re: /\b(how far|distance|range|how close)\b/i, term: true },
   { id: 'read', re: /\b(read|what does it say|what('| i)?s written|text|sign says|translate)\b/i },
   { id: 'count', re: /\b(how many|count|tally)\b/i, term: true },
@@ -91,6 +91,9 @@ const INTENTS = [
   { id: 'history', re: /\b(what (have you|did you) seen|history|log|timeline|earlier|so far)\b/i },
   { id: 'seen-before', re: /\b(have you seen|do you remember|seen before)\b/i, term: true },
   { id: 'hazard', re: /\b(hazard|dangerous|is it safe|safety|warning|risk)\b/i },
+  { id: 'similar', re: /\b(what else looks like|anything similar|similar to|more like this|like this one|same kind|match this)\b/i },
+  { id: 'on-surface', re: /\b(what('| i)?s|what is|anything)\s+on\s+(the|my|this)\b/i, term: true },
+  { id: 'find-mode', re: /\b(find|look for|search for|hunt for|seek|help me find)\b/i, term: true },
   { id: 'lock', re: /\b(lock|track|follow|focus on|pin)\b/i, term: true },
   { id: 'unlock', re: /\b(unlock|release|drop (the )?(lock|target)|clear target|stop tracking)\b/i },
   { id: 'capture', re: /\b(capture|photo|snapshot|screenshot|take a picture)\b/i },
@@ -126,7 +129,8 @@ const STOPWORDS = new Set([
   'could', 'would', 'will', 'shall', 'you', 'your', 'see', 'seeing', 'any', 'anything', 'something', 'there', 'do',
   'does', 'did', 'and', 'or', 'but', 'again', 'watch', 'watching', 'alert', 'when', 'if', 'look', 'looking', 'now',
   'am', 'i', 'im', 'we', 'us', 'thing', 'object', 'item', 'front', 'behind', 'left', 'right', 'near', 'close',
-  'as', 'call', 'called', 'name', 'named', 'know', 'think', 'say', 'says', 'written'
+  'as', 'call', 'called', 'name', 'named', 'know', 'think', 'say', 'says', 'written', 'before', 'yet',
+  'already', 'ever', 'this', 'that', 'one', 'kind', 'sort'
 ]);
 
 /** Pull the subject out of an utterance: "what colour is the red mug" → "mug". */
@@ -172,7 +176,7 @@ export function parse(text) {
  * Response
  * ------------------------------------------------------------------ */
 
-function findRecord(records, term) {
+export function matchRecord(records, term) {
   if (!term) return null;
   const rec = lookup(term, { fuzzy: true });
   const names = new Set([term.toLowerCase()]);
@@ -228,7 +232,7 @@ export function respond(utterance, ctx) {
       };
     }
     case 'colour': {
-      const target = term ? findRecord(records, term) : (locked?.record || biggestOfInterest(records));
+      const target = term ? matchRecord(records, term) : (locked?.record || biggestOfInterest(records));
       if (!target) return { say: term ? `I cannot see ${articleFor(term)} ${term}, ${addr}.` : 'Nothing in view to sample.' };
       const colour = target.attributes?.colour;
       if (!colour) return { say: `Colour not read yet for the ${target.label}. Give me a moment.` };
@@ -241,7 +245,7 @@ export function respond(utterance, ctx) {
       };
     }
     case 'material': {
-      const target = term ? findRecord(records, term) : (locked?.record || biggestOfInterest(records));
+      const target = term ? matchRecord(records, term) : (locked?.record || biggestOfInterest(records));
       if (!target) return { say: `I cannot see ${articleFor(term || 'that')} ${term || 'anything'}.` };
       const mats = target.attributes?.materials || [];
       if (!mats.length) return { say: `No material read yet for the ${target.label}.` };
@@ -252,7 +256,7 @@ export function respond(utterance, ctx) {
       };
     }
     case 'where': {
-      const target = findRecord(records, term) || (term ? null : biggestOfInterest(records));
+      const target = matchRecord(records, term) || (term ? null : biggestOfInterest(records));
       if (!target) {
         // If the user names something, never substitute a different object —
         // check the log instead and be honest about what is and is not in view.
@@ -269,7 +273,7 @@ export function respond(utterance, ctx) {
       return { say: `The ${target.label} is ${pos}${dist}.`, record: target, action: 'highlight', id: target.id };
     }
     case 'distance': {
-      const target = term ? findRecord(records, term) : (locked?.record || biggestOfInterest(records));
+      const target = term ? matchRecord(records, term) : (locked?.record || biggestOfInterest(records));
       if (!target) return { say: 'Nothing to range.' };
       if (!target.distance?.metres) return { say: `I cannot estimate the range of the ${target.label} without a known size.`, record: target };
       const { metres, min, max, method } = target.distance;
@@ -287,7 +291,7 @@ export function respond(utterance, ctx) {
       return { say: `${prefix}Reading: ${joined}.`, action: 'texts', texts };
     }
     case 'count': {
-      const target = term ? findRecord(records, term) : null;
+      const target = term ? matchRecord(records, term) : null;
       const matches = target ? records.filter((r) => r.label === target.label || r.noun === target.noun) : records;
       const noun = target ? plural(target.label, matches.length) : 'objects';
       const mem = term && memory ? memory.countOf(term) : null;
@@ -334,10 +338,58 @@ export function respond(utterance, ctx) {
       };
     }
     case 'seen-before': {
-      const mem = term && memory ? memory.countOf(term) : null;
-      if (!mem || !mem.total) return { say: `I have not logged ${term || 'that'} before.` };
-      const when = new Date(mem.last).toLocaleTimeString();
-      return { say: `Yes — ${mem.total} ${plural('sighting', mem.total)} of ${term}, the last at ${when}.` };
+      if (term) {
+        const mem = memory ? memory.countOf(term) : null;
+        if (!mem || !mem.total) return { say: `I have not logged ${term} before.` };
+        const when = new Date(mem.last).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        return { say: `Yes — ${mem.total} ${plural('sighting', mem.total)} of ${term}, the last at ${when}.` };
+      }
+      // No name given: compare the object's appearance against everything logged.
+      const target = locked?.record || biggestOfInterest(records);
+      if (!target) return { say: 'Nothing in view to compare against memory.' };
+      const hits = memory?.findSimilar(target.embeddingVec, { minScore: 0.7, limit: 2 }) || [];
+      const exact = memory?.countOf(target.label);
+      if (!hits.length) {
+        if (exact?.total) return { say: `I have logged the ${target.label} ${exact.total} times, but nothing else looks like it.` };
+        return { say: `This is the first ${target.label} I have logged.` };
+      }
+      const best = hits[0];
+      const when = new Date(best.lastSeen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      return {
+        say: `That looks like the ${best.label} I have seen ${best.count} times before — ${Math.round(best.score * 100)} percent match, last at ${when}.`,
+        record: target, action: 'highlight', id: target.id
+      };
+    }
+    case 'similar': {
+      const target = locked?.record || biggestOfInterest(records);
+      if (!target) return { say: 'Nothing in view to compare.' };
+      const hits = memory?.findSimilar(target.embeddingVec, { minScore: 0.7, exclude: target.label }) || [];
+      if (!hits.length) return { say: `I have nothing else on file that looks like the ${target.label}.` };
+      const listed = hits.map((h) => `${h.label} (${Math.round(h.score * 100)} percent match, seen ${h.count} times)`).join('; ');
+      return { say: `Closest matches to the ${target.label}: ${listed}.`, action: 'history', entries: hits };
+    }
+    case 'on-surface': {
+      const surface = term ? matchRecord(records, term) : records.find((r) => r.supports?.length);
+      if (!surface) {
+        const named = records.filter((r) => r.on).map((r) => `${r.label} on the ${r.on}`);
+        if (!named.length) return { say: 'I cannot tell what is resting on anything yet.' };
+        return { say: `I can see ${named.join(', ')}.`, records: records.filter((r) => r.on) };
+      }
+      if (!surface.supports?.length) return { say: `Nothing is on the ${surface.label}.`, record: surface };
+      return {
+        say: `On the ${surface.label}: ${surface.supports.join(', ')}.`,
+        record: surface, action: 'highlight', id: surface.id,
+        records: records.filter((r) => r.on === surface.label)
+      };
+    }
+    case 'find-mode': {
+      if (!term) return { say: 'What should I look for?' };
+      const present = matchRecord(records, term);
+      if (present) {
+        const where = present.distance ? `, ${bearingWord(present.distance.bearing)}${present.distance.metres ? `, about ${formatDistance(present.distance.metres, settings.units)}` : ''}` : '';
+        return { say: `The ${present.label} is in view${where}.`, action: 'highlight', id: present.id };
+      }
+      return { say: `Looking for ${term}. I will guide you.`, action: 'find', term };
     }
     case 'hazard': {
       const hazards = records.filter((r) => r.hazard);
@@ -348,7 +400,7 @@ export function respond(utterance, ctx) {
       };
     }
     case 'lock': {
-      const target = term ? findRecord(records, term) : biggestOfInterest(records);
+      const target = term ? matchRecord(records, term) : biggestOfInterest(records);
       if (!target) return { say: 'Nothing to lock onto.' };
       return { say: `Locked onto ${target.label}.`, action: 'lock', id: target.id };
     }
@@ -383,7 +435,7 @@ export function respond(utterance, ctx) {
     case 'thanks': return { say: `Any time, ${addr}.` };
     case 'stop': return { say: 'Standing by.', action: 'stop' };
     case 'lookup': {
-      const target = findRecord(records, term);
+      const target = matchRecord(records, term);
       if (!target) return { say: `I do not have ${articleFor(term)} ${term} in view.` };
       return { say: describeRecord(target, settings), record: target, action: 'highlight', id: target.id };
     }

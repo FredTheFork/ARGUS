@@ -16,7 +16,7 @@ import { Memory } from './memory.js';
 import { Hud, bindSettingsSheet } from './ui.js';
 import { Voice, VoiceInput } from './speech.js';
 import { Installer, installGuide, detectPlatform, isSecureContextOk } from './install.js';
-import { respond, describeRecord, Narrator } from './agent.js';
+import { respond, describeRecord, matchRecord, Narrator } from './agent.js';
 import {
   VERSION, loadSettings, saveSettings, applyTheme, resetSettings, LINES, THEMES,
   pick, template, formatDistance, bearingWord, articleFor, categoryColour
@@ -140,6 +140,7 @@ async function loadModels() {
     }
   });
   state.pipeline.teach = state.memory.teach;
+  state.pipeline.onVerified = verifySession;
 
   try {
     state.hud.setBootStage('LOADING COMPUTE RUNTIME', 0.2);
@@ -163,10 +164,36 @@ async function loadModels() {
 
   // Optional modules load in the background: the detector alone is a usable
   // assistant, and the rest arrive without holding up first light.
+  // The model manifest is the contract between the shipped files and this code.
+  // Checking the digests turns "the fetch returned 200" into "these are the
+  // bytes that were tested".
+  state.modelManifest = await fetchManifest();
+  if (state.modelManifest) {
+    const expected = {
+      detector: state.modelManifest.models?.detector?.sha256,
+      classifier: state.modelManifest.models?.classifier?.sha256,
+      pose: state.modelManifest.models?.pose?.sha256,
+      hands: state.modelManifest.models?.hand?.sha256,
+      ocr: [state.modelManifest.models?.ocrDet?.sha256, state.modelManifest.models?.ocrRec?.sha256, state.modelManifest.models?.ocrCls?.sha256]
+    };
+    state.expectedHashes = expected;
+  }
+
   state.hud.setBootStage('PERCEPTION MODULES', 0.75);
   enableBySettings({ onProgress: (pct, msg) => {
     if (msg) state.hud.bootStageHint = msg;
-  } }).catch((err) => log(`warn: module load — ${err.message}`));
+  } }).then(() => {
+    const exp = state.expectedHashes || {};
+    verifySession(state.pipeline.detector.session, exp.detector);
+    verifySession(state.pipeline.classifier.session, exp.classifier);
+    verifySession(state.pipeline.pose.body, exp.pose);
+    verifySession(state.pipeline.pose.hand, exp.hands);
+    if (exp.ocr) {
+      verifySession(state.pipeline.ocr.det, exp.ocr[0]);
+      verifySession(state.pipeline.ocr.rec, exp.ocr[1]);
+      verifySession(state.pipeline.ocr.cls, exp.ocr[2]);
+    }
+  }).catch((err) => log(`warn: module load — ${err.message}`));
 
   state.hud.bootReady(`${state.pipeline.detector.info().name} · ${kbStats().objects} objects in vocabulary`);
   startLoop();
@@ -180,6 +207,26 @@ async function loadModels() {
       b.addEventListener('chargingchange', update);
     }).catch(() => {});
   }
+}
+
+async function fetchManifest() {
+  try {
+    const res = await fetch('models/manifest.json', { cache: 'force-cache' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    log(`note: model manifest unavailable (${err.message}) — integrity checks skipped`);
+    return null;
+  }
+}
+
+/** Compare a loaded session's digest with the manifest, once per model. */
+function verifySession(session, expected) {
+  if (!session || !expected) return;
+  const got = session.sha256;
+  if (!got) return;
+  if (got === expected) log(`verified: ${session.meta.label} sha256 ${got.slice(0, 12)}…`);
+  else log(`warn: ${session.meta.label} digest mismatch — expected ${expected.slice(0, 12)}…, got ${got.slice(0, 12)}…`);
 }
 
 async function offerDemo() {
@@ -351,6 +398,10 @@ async function runInference(frame, t) {
       }
     }
 
+    // Guided search ("find my keys"): keep the user oriented instead of just
+    // repeating that the object is not in view.
+    const find = evaluateFind(result);
+
     // Proactive narration.
     const lines = state.narrator.evaluate(result, { settings: state.settings, memory: state.memory, paused: state.paused });
     for (const line of lines) {
@@ -360,10 +411,56 @@ async function runInference(frame, t) {
       if (line.tone === 'alert') state.hud.toast(spoken, 'alert');
       if (line.record) state.tickerId = line.record.id;
     }
-    state.hud._tickerLine = lines[0]?.text || state.lastSpoken || '';
+    if (find?.line) {
+      state.voice.say(normaliseForSpeech(find.line), { priority: find.found ? 2 : 1, tone: find.found ? 'good' : 'info' });
+      state.lastSpoken = find.line;
+    }
+    state.hud._tickerLine = lines[0]?.text || find?.line || state.lastSpoken || '';
   } catch (err) {
     log(`warn: frame failed — ${err.message}`);
   }
+}
+
+/**
+ * Guided search loop. Once the user asks for something, every frame answers the
+ * only question that matters — which way to turn and whether it is getting
+ * closer — capped at one utterance every few seconds so it guides without
+ * chattering.
+ */
+function evaluateFind(result) {
+  const term = state.findTarget;
+  if (!term) return null;
+  const records = result?.records || [];
+  const rec = matchRecord(records, term);
+  const now = performance.now();
+  if (rec) {
+    const bearing = rec.distance?.bearing ?? 0;
+    const dist = rec.distance?.metres ?? null;
+    const range = dist != null ? `, about ${formatDistance(dist, state.settings.units)} away` : '';
+    let line = null;
+    if (now - (state.findLastSpoke || 0) > 3200) {
+      const prev = state.findPrev;
+      const direction = bearing > 0 ? 'right' : 'left';
+      line = Math.abs(bearing) < 8
+        ? template(pick(LINES.findCentred), { Name: rec.label, range })
+        : template(pick(LINES.findTurn), { Name: rec.label, range, direction });
+      if (prev?.dist != null && dist != null) {
+        if (dist < prev.dist - Math.max(0.15, prev.dist * 0.08)) line = template(pick(LINES.findClosing), { Name: rec.label, range });
+        else if (dist > prev.dist + Math.max(0.25, prev.dist * 0.15)) line = template(pick(LINES.findReceding), { Name: rec.label, range });
+      }
+      state.findLastSpoke = now;
+      state.findFound = true;
+    }
+    state.findPrev = { dist, bearing };
+    return { found: true, record: rec, line };
+  }
+  state.findPrev = { dist: null, bearing: null };
+  state.findFound = false;
+  if (now - (state.findLastSpoke || 0) > 9000) {
+    state.findLastSpoke = now;
+    return { found: false, line: template(pick(LINES.findWait), { term }) };
+  }
+  return { found: false, line: null };
 }
 
 function hudState() {
@@ -386,6 +483,7 @@ function hudState() {
     paused: state.paused,
     facing: state.facing,
     tickerLine: state.hud?._tickerLine || '',
+    find: state.findTarget ? { term: state.findTarget, line: state.findLine || '', found: !!state.findFound } : null,
     lastSpoken: state.lastSpoken || ''
   };
 }
@@ -508,6 +606,17 @@ async function applyAction(reply) {
       if (!state.voiceInput?.supported) { state.hud.toast('Voice input unsupported', 'warn'); break; }
       state.voiceInput.start({ continuous: true });
       state.hud.toast('Listening', 'good');
+      break;
+    case 'find': {
+      state.findTarget = reply.term;
+      state.findPrev = null;
+      state.findFound = false;
+      state.findLastSpoke = 0;
+      state.hud.toast(`Searching: ${reply.term}`, 'info');
+      break;
+    }
+    case 'unwatch':
+      if (state.findTarget && (!reply.term || String(state.findTarget).includes(String(reply.term)))) state.findTarget = null;
       break;
     case 'watch':
       state.hud.toast(`Watching for ${reply.entry?.label || ''}`, 'good');
@@ -646,6 +755,9 @@ function renderDetail(rec, { silent = false } = {}) {
   if (rec.hazard) rows.push(['hazard', rec.hazard.note || rec.hazard.kind]);
   if (rec.taught) rows.push(['taught', `${rec.taught.label} · ${(rec.taught.score * 100).toFixed(0)}% match · ${rec.taught.samples} samples`]);
   if (rec.age) rows.push(['tracked for', `${(rec.age / 1000).toFixed(1)} s`]);
+  if (rec.on) rows.push(['resting on', rec.on]);
+  if (rec.supports?.length) rows.push(['on it', rec.supports.join(', ')]);
+  if (rec.attributes?.samples) rows.push(['appearance reads', String(rec.attributes.samples)]);
 
   const mats = (rec.attributes?.materials || []).slice(0, 4);
   const cls = (rec.classifier || []).slice(0, 5);
@@ -930,7 +1042,7 @@ function bindUI() {
   });
 
   // Handle manifest shortcuts: ?action=capture|status|settings
-  const action = new URLSearchParams(location.search).get('action');
+  const action = new URLSearchParams(window.location.search || '').get('action');
   if (action === 'capture') setTimeout(() => capture(), 2500);
   if (action === 'status') setTimeout(() => handleQuery('status'), 2500);
   if (action === 'settings') setTimeout(() => state.hud.openModal('settings-sheet'), 1200);
@@ -1017,6 +1129,7 @@ function importMemory() {
     try {
       const result = state.memory.import(await file.text());
       state.pipeline.teach = state.memory.teach;
+  state.pipeline.onVerified = verifySession;
       renderMemory();
       state.hud.toast(`Imported ${result.taught} taught, ${result.known} known`, 'good');
     } catch (err) {
@@ -1100,13 +1213,22 @@ function enableBySettings({ onProgress } = {}) {
 window.addEventListener('error', (event) => log(`error: ${event.message}`));
 window.addEventListener('unhandledrejection', (event) => log(`warn: unhandled rejection — ${event.reason?.message || event.reason}`));
 
-window.addEventListener('DOMContentLoaded', () => {
+function start() {
   boot().catch((err) => {
     log(`error: boot failed — ${err.stack || err.message}`);
-    document.getElementById('boot-error')?.removeAttribute('hidden');
+    const box = document.getElementById('boot-error');
+    if (box) box.hidden = false;
     const detail = document.getElementById('boot-detail');
     if (detail) detail.textContent = err.message;
+    const demo = document.getElementById('demo-fallback');
+    if (demo) demo.hidden = false;
   });
-});
+}
 
-export { state, handleQuery, capture, learnObject, normaliseForSpeech };
+// A module script runs before DOMContentLoaded, but if the page was already
+// parsed (slow module graph, bfcache restore) starting from readyState is safer
+// than waiting for an event that has already fired.
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+else start();
+
+export { state, start, handleQuery, capture, learnObject, normaliseForSpeech };

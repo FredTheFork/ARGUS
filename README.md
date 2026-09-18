@@ -36,6 +36,8 @@ a box.
 | **Range** | Monocular distance from a per-object real-world height prior, upgraded to pose measurement when a person is in frame | `js/attributes.js` |
 | **Scene** | Room and setting inference from the objects present plus lighting statistics (kelvin, key direction, indoor/outdoor) | `js/attributes.js` |
 | **Identity** | A tracker keeps objects across frames, so it can say *the mug has moved left*, hold a lock on a target, and tell "new" from "still there" | `js/tracker.js` |
+| **Relations** | What is resting on what — "on the table: mug, laptop" — from containment between boxes, no segmentation model needed | `js/pipeline.js` |
+| **Appearance memory** | Every observation keeps a quantised 1280-d centroid, so the assistant can answer "have you seen this before" by comparing how the object *looks*, not just what it was called | `js/memory.js` |
 
 The vocabulary is the sum of those layers: **928 curated objects, 1 802 aliases,
 1 000 ImageNet classes, 320 brands, 57 materials and 157 named colours — 3 304
@@ -53,10 +55,17 @@ read that sign · what does it say · how many bottles
 who is that · what are they doing · is anything dangerous
 teach this as my inhaler · forget my mug · what have you learned
 watch for dogs · stop watching for dogs · what are you watching
-have you seen a drill before · what have you seen today
+have you seen a drill before · have you seen this before
+what else looks like this · what is on the table
+find my keys · look for the van · stop looking for dogs
 lock on to the van · unlock · capture · pause · resume
 mute · unmute · detail mode · performance mode · status · modules · help
 ```
+
+**Guided search.** Ask for something that is not in view and ARGUS stops
+guessing: it tracks the request frame by frame and calls the correction —
+"keys, about 2 metres — turn left", "found the keys, dead ahead". It grows
+quieter as you get there rather than repeating itself.
 
 Type them in the query bar, or open the microphone and speak. ARGUS also speaks
 first when it matters: hazards and safety signage, watchlist matches, objects
@@ -84,12 +93,24 @@ entirely with one button.
 
 ```bash
 node tools/serve.mjs          # http://localhost:8080
+npm test                      # 190 headless checks, no browser required
 ```
 
 The dev server sends `Cross-Origin-Opener-Policy` and
 `Cross-Origin-Embedder-Policy` so the page is cross-origin isolated, which is
 what lets onnxruntime-web use SharedArrayBuffer and multiple threads. Without
 those headers inference still works, single-threaded.
+
+`npm test` runs three suites: **logic** (knowledge base, colour and material
+analysis, tracker, memory, language, fusion relations), **assets** (every import
+resolves to a real export, every shipped file exists, model digests match
+`models/manifest.json`) and **boot** (the real `app.js` start-up under a DOM that
+refuses the camera and blocks the runtime, proving the failure is reported
+instead of thrown).
+
+At runtime the same manifest is checked in the other direction: each model is
+hashed as it loads and compared with `models/manifest.json`, so "the fetch
+returned 200" becomes "these are the bytes that were tested".
 
 Then open the address on the phone, allow the camera, and *Add to Home Screen*
 (Safari) or *Install app* (Chrome). The service worker caches the whole app and

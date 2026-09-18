@@ -51,6 +51,7 @@ export class Classifier {
     if (this.session) return this.session;
     // Quantised graph: explicitly prefer WASM, where ORT has native QLinear ops.
     this.session = await this.runtime.session(MODEL_URL, {
+      verify: true,
       label: 'IMAGENET CLASSIFIER',
       ep: this.runtime.tier === 'webgpu' ? ['wasm'] : null,
       onProgress

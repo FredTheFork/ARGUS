@@ -118,6 +118,7 @@ export class Hud {
       this._bracket(ctx, record, box, scale, state);
     }
 
+    if (state.find?.term) this._findMarker(ctx, state, px, py, scale);
     this._edges(ctx, state);
     if (state.lockedId) this._lockLink(ctx, display, state.lockedId);
     if (this._flashUntil > performance.now()) {
@@ -167,6 +168,29 @@ export class Hud {
     ctx.font = '600 13px ui-monospace, monospace';
     ctx.textAlign = 'center';
     ctx.fillText('OPTICS PAUSED', this.width / 2, this.height / 2 + 5);
+    ctx.restore();
+  }
+
+  /** Green target ring while the user is searching for something by name. */
+  _findMarker(ctx, state, px, py, scale) {
+    const term = String(state.find.term || '').toLowerCase();
+    const hit = (state.records || []).find((r) => (r.label || '').toLowerCase().includes(term) || (r.noun || '').toLowerCase().includes(term));
+    if (!hit) return;
+    const x = Math.min(px(hit.box[0]), px(hit.box[2]));
+    const y = Math.min(py(hit.box[1]), py(hit.box[3]));
+    const w = Math.abs(px(hit.box[2]) - px(hit.box[0]));
+    const h = Math.abs(py(hit.box[3]) - py(hit.box[1]));
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 220);
+    ctx.save();
+    ctx.strokeStyle = `rgba(109,255,155,${0.5 + pulse * 0.45})`;
+    ctx.lineWidth = 2.6 * (this.style === 'glasses' ? 1.3 : 1);
+    ctx.shadowColor = 'rgba(109,255,155,.7)';
+    ctx.shadowBlur = 12;
+    ctx.strokeRect(x - 4, y - 4, w + 8, h + 8);
+    ctx.shadowBlur = 0;
+    ctx.font = `600 ${11 * scale}px ui-monospace, monospace`;
+    ctx.fillStyle = 'rgba(109,255,155,.95)';
+    ctx.fillText('SEARCH TARGET', x - 2, y - 10);
     ctx.restore();
   }
 
@@ -484,7 +508,10 @@ export class Hud {
     const sceneSub = $('scene-sub');
     if (sceneSub) {
       const l = state.lighting;
-      sceneSub.textContent = l ? `${l.key} · ${l.kelvin}K · ${Math.round(l.brightness * 100)}% light` : '—';
+      const lightText = l ? `${l.key} · ${l.kelvin}K · ${Math.round(l.brightness * 100)}% light` : '—';
+      sceneSub.textContent = state.find
+        ? `searching: ${state.find.term}${state.find.found ? ' · in view' : ''}`
+        : lightText;
     }
     const sceneText = $('scene-text');
     if (sceneText) {
@@ -536,7 +563,7 @@ export class Hud {
       const now = performance.now();
       if (now - this._lastTickerSet > 900) {
         this._lastTickerSet = now;
-        const line = state.tickerLine || state.lastSpoken || '';
+        const line = state.find?.line || state.tickerLine || state.lastSpoken || '';
         if (line && ticker.textContent !== line) ticker.textContent = line;
       }
     }

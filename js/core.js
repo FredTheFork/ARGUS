@@ -164,7 +164,7 @@ export class Runtime {
    * Create (or reuse) a session for a model. Sessions are cached by URL so a
    * module that is toggled off and on again does not re-download 10 MB.
    */
-  async session(url, { label = url, ep = null, onProgress = () => {} } = {}) {
+  async session(url, { label = url, ep = null, onProgress = () => {}, verify = false } = {}) {
     if (this.sessions.has(url)) return this.sessions.get(url);
     const bytes = await fetchVerified(url, {
       label,
@@ -172,6 +172,9 @@ export class Runtime {
       onStage: (msg, pct) => onProgress(pct, msg)
     });
     if (!isOnnx(bytes)) throw new Error(`${label} is not an ONNX protobuf (bad header)`);
+    // Hashing 13 MB costs a few milliseconds and turns "the file arrived" into
+    // "this is the file the manifest describes".
+    const digest = verify ? await sha256(bytes) : null;
     const providers = ep || this.providers;
     const started = performance.now();
     const session = await this.ort.InferenceSession.create(bytes.buffer, {
@@ -182,6 +185,7 @@ export class Runtime {
     const wrapper = new Session(session, {
       url, label, providers,
       bytes: bytes.length,
+      sha256: digest,
       loadMs: Math.round(performance.now() - started)
     });
     this.sessions.set(url, wrapper);
@@ -208,6 +212,7 @@ export class Session {
 
   get loadMs() { return this.meta.loadMs || 0; }
   get bytes() { return this.meta.bytes || 0; }
+  get sha256() { return this.meta.sha256 || null; }
 
   run(feeds) {
     this.busy = true;

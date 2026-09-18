@@ -178,7 +178,10 @@ export class Pipeline {
         records.push(this._record(track, time));
       }
 
-      /* --- 4. schedule background jobs -------------------------------- */
+      /* --- 4. spatial relations --------------------------------------- */
+      this._relations(records, frame);
+
+      /* --- 5. schedule background jobs -------------------------------- */
       this._scheduleBackground(frame, records, time);
       this._sceneCache(records, time);
 
@@ -236,16 +239,62 @@ export class Pipeline {
    * In-frame stages
    * ---------------------------------------------------------------- */
 
+  /**
+   * Colour and material read, with temporal voting.
+   *
+   * A single frame of a glossy object flashes between "black" and "silver"
+   * depending on where the highlight falls, so each object keeps a short vote
+   * tally and the stable winner is what gets reported. The newest read still
+   * supplies the palette and cues — only the *name* is voted on.
+   */
   _attributes(track, frame) {
-    if (track.attributes && performance.now() - (track.attrAt || 0) < (this.settings.attributesEvery || 900)) {
-      // Keep the cached read; refresh slowly so a turning object catches up.
-      return;
-    }
+    const now = performance.now();
+    const cadence = this.settings.attributesEvery ?? 900;
+    if (track.attributes && now - (track.attrAt || 0) < cadence) return;
     const appearance = analyseAppearance(frame, track.box, { cls: track.label || track.cls, maxSize: 96 });
-    if (appearance) {
-      track.attributes = appearance;
-      track.attrAt = performance.now();
+    if (!appearance) return;
+    track.attrAt = now;
+
+    const votes = track.attrVotes || (track.attrVotes = { colour: new Map(), material: new Map(), pattern: new Map(), finish: new Map(), n: 0 });
+    votes.n++;
+    const tally = (map, key, weight = 1) => {
+      if (!key) return;
+      const cur = map.get(key) || 0;
+      map.set(key, cur * 0.72 + weight);
+      if (map.size > 6) {
+        // forget the weakest reading so the vote can change its mind
+        const weakest = [...map.entries()].sort((a, b) => a[1] - b[1])[0];
+        if (weakest) map.delete(weakest[0]);
+      }
+    };
+    tally(votes.colour, appearance.colour?.name);
+    tally(votes.material, appearance.material?.name, appearance.material?.confidence || 0);
+    tally(votes.pattern, appearance.pattern?.id);
+    tally(votes.finish, appearance.finish);
+
+    const winner = (map, fallback) => {
+      if (!map.size) return fallback;
+      return [...map.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    };
+    const colourName = winner(votes.colour, appearance.colour?.name);
+    const materialName = winner(votes.material, appearance.material?.name);
+
+    // Material score is averaged over the votes for that material, so a single
+    // lucky frame cannot promote an implausible one.
+    const materials = (appearance.materials || []).map((m) => ({ ...m }));
+    if (materialName && !materials.some((m) => m.name === materialName)) {
+      materials.unshift({ name: materialName, score: appearance.material?.confidence || 0.3 });
     }
+
+    track.attributes = {
+      ...appearance,
+      colour: { ...appearance.colour, name: colourName, stable: votes.n > 2 },
+      material: materialName ? { name: materialName, confidence: appearance.material?.confidence || 0.3 } : appearance.material,
+      materials,
+      pattern: { ...(appearance.pattern || {}), id: winner(votes.pattern, appearance.pattern?.id) },
+      finish: winner(votes.finish, appearance.finish),
+      samples: votes.n
+    };
   }
 
   async _classify(track, frame, time) {
@@ -414,6 +463,51 @@ export class Pipeline {
       // Pose keypoints measure a body better than a bounding box measures a
       // person, so the range estimate is upgraded when they exist.
       if (track.distance) track.distanceFromPose = true;
+    }
+  }
+
+  /**
+   * Work out what is resting on what.
+   *
+   * A surface is a large, low object from a known family (table, worktop,
+   * shelf, floor…) or simply something that fills a lot of the frame and sits
+   * below the horizon. Anything whose centre falls inside a surface's box and
+   * which is much smaller is reported as "on" it — enough to answer "what is on
+   * the table" without any segmentation model.
+   */
+  _relations(records, frame) {
+    if (records.length < 2) return;
+    const SURFACES = ['table', 'desk', 'counter', 'worktop', 'work surface', 'shelf', 'shelving', 'floor', 'ground',
+      'bench', 'tray', 'board', 'plate', 'mat', 'bed', 'sofa', 'couch', 'chair', 'stool', 'step', 'platform',
+      'conveyor', 'belt', 'pallet', 'sink', 'hob', 'stove', 'dashboard', 'seat', 'tabletop'];
+    const area = (b) => Math.max(1, (b[2] - b[0]) * (b[3] - b[1]));
+    const frameArea = frame ? frame.width * frame.height : 1;
+    const surfaces = records.filter((r) => {
+      const name = (r.noun || r.label || '').toLowerCase();
+      const named = SURFACES.some((s) => name.includes(s));
+      const big = area(r.box) > frameArea * 0.08;
+      return named || big;
+    });
+    for (const surface of surfaces) {
+      surface.supports = [];
+    }
+    for (const rec of records) {
+      const cx = (rec.box[0] + rec.box[2]) / 2;
+      const cy = (rec.box[1] + rec.box[3]) / 2;
+      let best = null;
+      for (const surface of surfaces) {
+        if (surface === rec) continue;
+        if (area(surface.box) < area(rec.box) * 1.8) continue;
+        const inside = cx > surface.box[0] && cx < surface.box[2] && cy > surface.box[1] && cy < surface.box[3];
+        if (inside && (!best || area(surface.box) < area(best.box))) best = surface;
+      }
+      if (best) {
+        rec.on = best.label;
+        best.supports.push(rec.label);
+      }
+    }
+    for (const surface of surfaces) {
+      if (surface.supports) surface.supports = [...new Set(surface.supports)].slice(0, 8);
     }
   }
 

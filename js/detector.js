@@ -43,7 +43,8 @@ export class Detector {
     if (this.session) return this.session;
     this.session = await this.runtime.session(MODEL_URL, {
       label: 'YOLOv8-NANO DETECTOR',
-      onProgress
+      onProgress,
+      verify: true
     });
     this.inputName = this.session.inputs[0];
     this.outputName = this.session.outputs[0];
