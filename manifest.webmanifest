@@ -1,7 +1,7 @@
 {
-  "name": "ARGUS — AR Vision Assistant",
+  "name": "ARGUS — Visual Agent",
   "short_name": "ARGUS",
-  "description": "On-device augmented-reality vision assistant. YOLOv8 object recognition, spoken call-outs, target locking and capture logging — all running locally on your phone, fully offline.",
+  "description": "On-device visual agent. ~1800-class recognition with fine-grained naming, colour and material analysis, text and brand reading, pose and gesture sensing, spoken answers and a heads-up display built for glasses. Nothing leaves the device.",
   "id": "argus-ar-vision",
   "start_url": "./",
   "scope": "./",

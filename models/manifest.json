@@ -1,0 +1,115 @@
+{
+  "version": "2.0.0",
+  "models": {
+    "detector": {
+      "file": "yolov8n.onnx",
+      "name": "YOLOv8-nano detector",
+      "task": "object detection",
+      "classes": 80,
+      "dataset": "COCO 2017",
+      "input": "1x3xHxW (letterbox, RGB/255)",
+      "output": "1x84xN",
+      "always": true,
+      "bytes": 12675403,
+      "sha256": "147613112e680b3f78f0d409488d6b91ef368e0e8523fdb69574de3ce29e669d",
+      "mb": 12.09
+    },
+    "classifier": {
+      "file": "imagenet-lite4.onnx",
+      "name": "EfficientNet-Lite4 classifier",
+      "task": "1000-class ImageNet-1k + 1280-d embedding",
+      "input": "1x224x224x3 (float, -1..1)",
+      "output": "1x1000 softmax + 1x1280 embedding",
+      "bytes": 13470077,
+      "sha256": "5f3bb09692a301f79d052e5aa35e3ccd9f9ae537ea4b8f041281e0a387b3e7b5",
+      "mb": 12.85
+    },
+    "pose": {
+      "file": "yolov8n-pose.onnx",
+      "name": "YOLOv8-nano pose",
+      "task": "17 body keypoints",
+      "input": "1x3x320..640",
+      "output": "1x56xN",
+      "bytes": 3767416,
+      "sha256": "3a45b174aae481e6fc7e2f71e62c73661eac661201ff0b2a21703a4fe7615a7d",
+      "mb": 3.59
+    },
+    "hand": {
+      "file": "yolov8n-hand.onnx",
+      "name": "YOLOv8-nano hand",
+      "task": "21 hand keypoints",
+      "input": "1x3x224x224",
+      "output": "1x68xN",
+      "bytes": 3621259,
+      "sha256": "632e1017433ddb2ca7ce36060bc3e28a86f39ed378df21a2a7a599b282af79c8",
+      "mb": 3.45
+    },
+    "ocrDet": {
+      "file": "ppocr-det.onnx",
+      "name": "PP-OCRv4 detection",
+      "task": "text region detection (DBNet)",
+      "input": "1x3xHxW",
+      "output": "1x1xHxW",
+      "bytes": 4745517,
+      "sha256": "d2a7720d45a54257208b1e13e36a8479894cb74155a5efe29462512d42f49da9",
+      "mb": 4.53
+    },
+    "ocrRec": {
+      "file": "ppocr-rec.onnx",
+      "name": "PP-OCRv4 recognition",
+      "task": "CTC text recognition (6623 charset)",
+      "input": "1x3x48xW",
+      "output": "1xTx6625",
+      "bytes": 10857958,
+      "sha256": "48fc40f24f6d2a207a2b1091d3437eb3cc3eb6b676dc3ef9c37384005483683b",
+      "mb": 10.35
+    },
+    "ocrCls": {
+      "file": "ppocr-cls.onnx",
+      "name": "PP-OCR orientation",
+      "task": "0/180 degree text classifier",
+      "input": "1x3x48x192",
+      "output": "1x2",
+      "bytes": 585532,
+      "sha256": "e47acedf663230f8863ff1ab0e64dd2d82b838fceb5957146dab185a89d6215c",
+      "mb": 0.56
+    }
+  },
+  "runtime": {
+    "name": "onnxruntime-web",
+    "version": "1.30.0",
+    "bundles": {
+      "wasm": {
+        "file": "ort.min.js",
+        "bytes": 368025,
+        "sha256": "7ae472a8ec976bcb69ad46b89b0a6ec8f3c5dbea4477674a26958672d1f3322d"
+      },
+      "webgpu": {
+        "file": "ort.webgpu.min.js",
+        "bytes": 66417,
+        "sha256": "7d65dad7eb4564ad98db9924a259af2e2c68ebfbdbf254fa5d728f1c5736e07a"
+      },
+      "wasmLoader": {
+        "file": "ort-wasm-simd-threaded.mjs",
+        "bytes": 24381,
+        "sha256": "e13f7f94fc51b4ca72b12faeb1ee95f4ace6dfbc8939bc718aabdc0a27c4299b"
+      },
+      "wasmBinary": {
+        "file": "ort-wasm-simd-threaded.wasm",
+        "bytes": 14239897,
+        "sha256": "3398c10d07d229bd91b364548e130e0e51a8e5704b88c7c083ebbeb78842dee2"
+      },
+      "webgpuLoader": {
+        "file": "ort-wasm-simd-threaded.jsep.mjs",
+        "bytes": 46851,
+        "sha256": "709853412fd1ffc34247af1e73569227b5b79629c5ca3f59cc39cf7e500e4947"
+      },
+      "webgpuBinary": {
+        "file": "ort-wasm-simd-threaded.jsep.wasm",
+        "bytes": 28312028,
+        "sha256": "3ad23231b5bd6d9dda55a7f84606315e0bf35b6750c28ee993c987c54cacab0f"
+      }
+    },
+    "note": "Vendored so the app works offline with no CDN. INT8 pose and hand graphs use ConvInteger, which the WASM execution provider only implements from version 1.21 onwards \u2014 do not downgrade without re-quantising those two models."
+  }
+}

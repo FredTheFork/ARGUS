@@ -1,14 +1,58 @@
 /**
- * ARGUS — Adaptive Recognition & Guidance Utility System
- * config.js — class taxonomy, theming, phrase bank and persisted settings.
+ * config.js — taxonomy, themes, phrase bank, settings.
+ *
+ * The category table is the single source of truth for HUD colour, spoken
+ * register and scene inference, so it covers everything the perception stack can
+ * say — not just the 80 COCO classes but the ~1800 things the knowledge base and
+ * ImageNet head can name.
  */
 
-export const VERSION = '1.1.0';
-export const BUILD = 'ARGUS-1.1.0/arm64';
+export const VERSION = '2.0.1';
+export const BUILD = 'ARGUS-2.0.1/vision-agent';
 
 /* ------------------------------------------------------------------ *
- * COCO-80 taxonomy (the classes the bundled YOLOv8-nano model emits)
+ * Category taxonomy
  * ------------------------------------------------------------------ */
+
+export const CATEGORIES = {
+  person:     { label: 'CREW',      colour: '#4ce0ff', register: 'crew' },
+  face:       { label: 'FACE',      colour: '#7fe8ff', register: 'crew' },
+  vehicle:    { label: 'VEHICLE',   colour: '#ffd166', register: 'vehicle' },
+  animal:     { label: 'BIOTA',     colour: '#7dff9b', register: 'animal' },
+  plant:      { label: 'FLORA',     colour: '#5fd27a', register: 'flora' },
+  food:       { label: 'RATION',    colour: '#ffe066', register: 'ration' },
+  kitchen:    { label: 'SERVICE',   colour: '#ffa14c', register: 'service' },
+  appliance:  { label: 'APPLIANCE', colour: '#ff9d5c', register: 'appliance' },
+  tech:       { label: 'TECH',      colour: '#9d8bff', register: 'tech' },
+  device:     { label: 'DEVICE',    colour: '#9d8bff', register: 'tech' },
+  fitting:    { label: 'FITTING',   colour: '#ffb2d8', register: 'fitting' },
+  tool:       { label: 'TOOL',      colour: '#8ab4ff', register: 'tool' },
+  furniture:  { label: 'FURNISH',   colour: '#8fb3a8', register: 'furniture' },
+  textile:    { label: 'TEXTILE',   colour: '#d4a5ff', register: 'textile' },
+  clothing:   { label: 'WEARABLE',  colour: '#ff9de0', register: 'clothing' },
+  container:  { label: 'CONTAINER', colour: '#c9d4e4', register: 'container' },
+  stationery: { label: 'STATIONERY', colour: '#a8d5ff', register: 'stationery' },
+  sign:       { label: 'SIGNAGE',   colour: '#7dffd4', register: 'sign' },
+  building:   { label: 'STRUCTURE', colour: '#b8b8b8', register: 'building' },
+  medical:    { label: 'MEDICAL',   colour: '#ff8f8f', register: 'medical' },
+  safety:     { label: 'SAFETY',    colour: '#ff6b6b', register: 'safety' },
+  hygiene:    { label: 'HYGIENE',   colour: '#9be8ff', register: 'hygiene' },
+  sport:      { label: 'SPORT',     colour: '#ffcf70', register: 'sport' },
+  toy:        { label: 'TOY',       colour: '#ffd1f0', register: 'toy' },
+  musical:    { label: 'MUSIC',     colour: '#c9a7ff', register: 'music' },
+  jewellery:  { label: 'VALUABLE',  colour: '#ffe08a', register: 'jewellery' },
+  money:      { label: 'VALUABLE',  colour: '#ffe08a', register: 'jewellery' },
+  weapon:     { label: 'CONTROLLED', colour: '#ff5b5b', register: 'weapon' },
+  misc:       { label: 'OBJECT',    colour: '#c9d4e4', register: 'misc' }
+};
+
+export const categoryColour = (category) => CATEGORIES[category]?.colour || CATEGORIES.misc.colour;
+export const categoryLabel = (category) => CATEGORIES[category]?.label || 'OBJECT';
+
+/* ------------------------------------------------------------------ *
+ * COCO-80 (the detector head)
+ * ------------------------------------------------------------------ */
+
 export const CLASSES = [
   'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
   'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat',
@@ -23,97 +67,51 @@ export const CLASSES = [
   'toothbrush'
 ];
 
-/** Display names used in the HUD (short, upper-case friendly). */
-export const DISPLAY_NAMES = {
-  person: 'PERSON', bicycle: 'BICYCLE', car: 'CAR', motorcycle: 'MOTORCYCLE',
-  airplane: 'AIRCRAFT', bus: 'BUS', train: 'TRAIN', truck: 'TRUCK', boat: 'VESSEL',
-  'traffic light': 'SIGNAL', 'fire hydrant': 'HYDRANT', 'stop sign': 'STOP SIGN',
-  'parking meter': 'METER', bench: 'BENCH', bird: 'BIRD', cat: 'CAT', dog: 'DOG',
-  horse: 'HORSE', sheep: 'SHEEP', cow: 'COW', elephant: 'ELEPHANT', bear: 'BEAR',
-  zebra: 'ZEBRA', giraffe: 'GIRAFFE', backpack: 'BACKPACK', umbrella: 'UMBRELLA',
-  handbag: 'BAG', tie: 'TIE', suitcase: 'CASE', frisbee: 'FRISBEE', skis: 'SKIS',
-  snowboard: 'SNOWBOARD', 'sports ball': 'BALL', kite: 'KITE', 'baseball bat': 'BAT',
-  'baseball glove': 'GLOVE', skateboard: 'SKATEBOARD', surfboard: 'SURFBOARD',
-  'tennis racket': 'RACKET', bottle: 'BOTTLE', 'wine glass': 'GLASS', cup: 'CUP',
-  fork: 'FORK', knife: 'KNIFE', spoon: 'SPOON', bowl: 'BOWL', banana: 'BANANA',
-  apple: 'APPLE', sandwich: 'SANDWICH', orange: 'ORANGE', broccoli: 'BROCCOLI',
-  carrot: 'CARROT', 'hot dog': 'HOT DOG', pizza: 'PIZZA', donut: 'DONUT', cake: 'CAKE',
-  chair: 'CHAIR', couch: 'SOFA', 'potted plant': 'PLANT', bed: 'BED',
-  'dining table': 'TABLE', toilet: 'FIXTURE', tv: 'DISPLAY', laptop: 'LAPTOP',
-  mouse: 'MOUSE', remote: 'REMOTE', keyboard: 'KEYBOARD', 'cell phone': 'PHONE',
-  microwave: 'MICROWAVE', oven: 'OVEN', toaster: 'TOASTER', sink: 'SINK',
-  refrigerator: 'FRIDGE', book: 'BOOK', clock: 'CLOCK', vase: 'VASE',
-  scissors: 'SCISSORS', 'teddy bear': 'TEDDY', 'hair drier': 'DRYER',
-  toothbrush: 'TOOTHBRUSH'
+/** Detector classes → ARGUS vocabulary + category. */
+export const COCO_META = {
+  person: ['person', 'person'], bicycle: ['bicycle', 'vehicle'], car: ['car', 'vehicle'],
+  motorcycle: ['motorbike', 'vehicle'], airplane: ['airplane', 'vehicle'], bus: ['bus', 'vehicle'],
+  train: ['train', 'vehicle'], truck: ['truck', 'vehicle'], boat: ['boat', 'vehicle'],
+  'traffic light': ['traffic light', 'sign'], 'fire hydrant': ['fire hydrant', 'fitting'],
+  'stop sign': ['stop sign', 'sign'], 'parking meter': ['parking meter', 'sign'],
+  bench: ['bench', 'furniture'], bird: ['bird', 'animal'], cat: ['cat', 'animal'],
+  dog: ['dog', 'animal'], horse: ['horse', 'animal'], sheep: ['sheep', 'animal'],
+  cow: ['cow', 'animal'], elephant: ['elephant', 'animal'], bear: ['bear', 'animal'],
+  zebra: ['zebra', 'animal'], giraffe: ['giraffe', 'animal'], backpack: ['backpack', 'container'],
+  umbrella: ['umbrella', 'clothing'], handbag: ['handbag', 'container'], tie: ['tie', 'clothing'],
+  suitcase: ['suitcase', 'container'], frisbee: ['frisbee', 'sport'], skis: ['skis', 'sport'],
+  snowboard: ['snowboard', 'sport'], 'sports ball': ['ball', 'sport'], kite: ['kite', 'toy'],
+  'baseball bat': ['baseball bat', 'sport'], 'baseball glove': ['gloves', 'sport'],
+  skateboard: ['skateboard', 'sport'], surfboard: ['surfboard', 'sport'],
+  'tennis racket': ['tennis racket', 'sport'], bottle: ['bottle', 'container'],
+  'wine glass': ['wine glass', 'kitchen'], cup: ['cup', 'kitchen'], fork: ['fork', 'kitchen'],
+  knife: ['knife', 'kitchen'], spoon: ['spoon', 'kitchen'], bowl: ['bowl', 'kitchen'],
+  banana: ['banana', 'food'], apple: ['apple', 'food'], sandwich: ['sandwich', 'food'],
+  orange: ['orange', 'food'], broccoli: ['broccoli', 'food'], carrot: ['carrot', 'food'],
+  'hot dog': ['hot dog', 'food'], pizza: ['pizza', 'food'], donut: ['donut', 'food'],
+  cake: ['cake', 'food'], chair: ['chair', 'furniture'], couch: ['sofa', 'furniture'],
+  'potted plant': ['houseplant', 'plant'], bed: ['bed', 'furniture'],
+  'dining table': ['table', 'furniture'], toilet: ['toilet', 'fitting'], tv: ['television', 'tech'],
+  laptop: ['laptop', 'device'], mouse: ['mouse', 'device'], remote: ['remote control', 'device'],
+  keyboard: ['keyboard', 'device'], 'cell phone': ['phone', 'device'],
+  microwave: ['microwave', 'appliance'], oven: ['oven', 'appliance'], toaster: ['toaster', 'appliance'],
+  sink: ['sink', 'fitting'], refrigerator: ['refrigerator', 'appliance'], book: ['book', 'stationery'],
+  clock: ['clock', 'misc'], vase: ['vase', 'misc'], scissors: ['scissors', 'tool'],
+  'teddy bear': ['teddy bear', 'toy'], 'hair drier': ['hair dryer', 'appliance'],
+  toothbrush: ['toothbrush', 'hygiene']
 };
 
-/** Groupings drive HUD colour and the spoken register. */
-const CATEGORY_GROUPS = {
-  crew: ['person'],
-  vehicle: ['bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat'],
-  animal: ['bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe'],
-  tech: ['tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven',
-    'toaster', 'sink', 'refrigerator', 'clock', 'hair drier'],
-  carry: ['backpack', 'umbrella', 'handbag', 'tie', 'suitcase'],
-  kit: ['frisbee', 'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat',
-    'baseball glove', 'skateboard', 'surfboard', 'tennis racket', 'scissors', 'teddy bear',
-    'toothbrush', 'vase', 'book', 'traffic light', 'fire hydrant', 'stop sign',
-    'parking meter', 'bench'],
-  table: ['bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl'],
-  rations: ['banana', 'apple', 'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog',
-    'pizza', 'donut', 'cake'],
-  interior: ['chair', 'couch', 'potted plant', 'bed', 'dining table', 'toilet']
-};
-
-export const CATEGORIES = {
-  crew:     { label: 'CREW',     colour: '#4ce0ff' },
-  vehicle:  { label: 'VEHICLE',  colour: '#ffd166' },
-  animal:   { label: 'BIOTA',    colour: '#7dff9b' },
-  tech:     { label: 'TECH',     colour: '#9d8bff' },
-  carry:    { label: 'KIT',      colour: '#ff9de0' },
-  kit:      { label: 'OBJECT',   colour: '#c9d4e4' },
-  table:    { label: 'SERVICE',  colour: '#ffa14c' },
-  rations:  { label: 'RATION',   colour: '#ffe066' },
-  interior: { label: 'FURNISH',  colour: '#8fb3a8' }
-};
-
-/** Interest tier: 3 = call out the moment it appears, 1 = log quietly. */
-const PRIORITY_3 = new Set([
-  'person', 'car', 'bus', 'truck', 'motorcycle', 'bicycle', 'train', 'boat', 'airplane',
-  'dog', 'cat', 'bird', 'horse', 'cell phone', 'laptop', 'knife', 'fire hydrant', 'stop sign'
-]);
-const PRIORITY_2 = new Set([
-  'cow', 'sheep', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'suitcase', 'handbag',
-  'bottle', 'cup', 'book', 'tv', 'chair', 'umbrella', 'skateboard', 'sports ball',
-  'traffic light', 'scissors'
-]);
-
-export const CLASS_META = (() => {
-  const meta = {};
-  for (const name of CLASSES) {
-    let category = 'kit';
-    for (const [key, list] of Object.entries(CATEGORY_GROUPS)) if (list.includes(name)) { category = key; break; }
-    meta[name] = {
-      name,
-      display: DISPLAY_NAMES[name] || name.toUpperCase(),
-      category,
-      colour: CATEGORIES[category].colour,
-      priority: PRIORITY_3.has(name) ? 3 : PRIORITY_2.has(name) ? 2 : 1
-    };
-  }
-  return meta;
-})();
-
-const AN_EXCEPTIONS = new Set(['airplane', 'apple', 'elephant', 'orange', 'umbrella', 'oven', 'orange']);
-export const articleFor = (word) => (AN_EXCEPTIONS.has(word) ? 'an' : 'a');
+export const DISPLAY_NAMES = Object.fromEntries(
+  Object.entries(COCO_META).map(([k, [name]]) => [k, name.toUpperCase().replace(' ', ' ')])
+);
 
 /* ------------------------------------------------------------------ *
- * Themes — each theme supplies CSS variables + the HUD accent colour.
+ * Themes
  * ------------------------------------------------------------------ */
+
 export const THEMES = {
   arc: {
-    label: 'ARC',
-    accent: '#4ce0ff',
+    label: 'ARC', accent: '#4ce0ff',
     vars: {
       '--accent': '#4ce0ff', '--accent-dim': '#1b6f8c', '--accent-glow': 'rgba(76,224,255,.35)',
       '--bg-0': '#02060c', '--bg-1': '#061420', '--bg-2': 'rgba(6,20,32,.72)',
@@ -121,8 +119,7 @@ export const THEMES = {
     }
   },
   mark7: {
-    label: 'MARK VII',
-    accent: '#ffb347',
+    label: 'MARK VII', accent: '#ffb347',
     vars: {
       '--accent': '#ffb347', '--accent-dim': '#8a5a12', '--accent-glow': 'rgba(255,179,71,.32)',
       '--bg-0': '#0b0703', '--bg-1': '#1a1005', '--bg-2': 'rgba(26,16,5,.72)',
@@ -130,8 +127,7 @@ export const THEMES = {
     }
   },
   ghost: {
-    label: 'GHOST',
-    accent: '#e8f4ff',
+    label: 'GHOST', accent: '#e8f4ff',
     vars: {
       '--accent': '#e8f4ff', '--accent-dim': '#6d8296', '--accent-glow': 'rgba(232,244,255,.22)',
       '--bg-0': '#05070a', '--bg-1': '#0d1219', '--bg-2': 'rgba(13,18,25,.72)',
@@ -139,19 +135,35 @@ export const THEMES = {
     }
   },
   matrix: {
-    label: 'GREEN',
-    accent: '#6dff9b',
+    label: 'GREEN', accent: '#6dff9b',
     vars: {
       '--accent': '#6dff9b', '--accent-dim': '#1f6b3c', '--accent-glow': 'rgba(109,255,155,.3)',
       '--bg-0': '#010604', '--bg-1': '#03150c', '--bg-2': 'rgba(3,21,12,.72)',
       '--ink': '#d8ffe8', '--line': 'rgba(109,255,155,.22)'
     }
+  },
+  amber: {
+    label: 'AMBER HUD', accent: '#ff8a00',
+    vars: {
+      '--accent': '#ff8a00', '--accent-dim': '#7a3f00', '--accent-glow': 'rgba(255,138,0,.3)',
+      '--bg-0': '#000000', '--bg-1': '#0a0600', '--bg-2': 'rgba(10,6,0,.7)',
+      '--ink': '#ffd9a0', '--line': 'rgba(255,138,0,.22)'
+    }
+  },
+  ice: {
+    label: 'ICE', accent: '#a7d8ff',
+    vars: {
+      '--accent': '#a7d8ff', '--accent-dim': '#4a7ba6', '--accent-glow': 'rgba(167,216,255,.28)',
+      '--bg-0': '#04070d', '--bg-1': '#0a1220', '--bg-2': 'rgba(10,18,32,.7)',
+      '--ink': '#e8f4ff', '--line': 'rgba(167,216,255,.2)'
+    }
   }
 };
 
 /* ------------------------------------------------------------------ *
- * Phrase bank — the "personality" of the assistant.
+ * Phrase bank
  * ------------------------------------------------------------------ */
+
 export const LINES = {
   boot: [
     'Initialising optical sensor.',
@@ -159,7 +171,7 @@ export const LINES = {
     'Calibrating visual cortex.',
     'Systems nominal.'
   ],
-  greetingMorning: ['Good morning. {addr}. All systems are online.'],
+  greetingMorning: ['Good morning, {addr}. All systems online.'],
   greetingAfternoon: ['Good afternoon, {addr}. Standing by.'],
   greetingEvening: ['Good evening, {addr}. Optics engaged.'],
   greetingNight: ['Working late, {addr}? Argus is online.'],
@@ -169,8 +181,8 @@ export const LINES = {
   targetLocked: ['Locked onto {name}.'],
   targetLost: ['{Name} lost. Resuming wide scan.'],
   targetCleared: ['Lock released. Wide scan restored.'],
-  foundOne: ['{Addr}, I have {article} {name} in view.', '{Article} {name} detected.', 'I see {article} {name}, {addr}.'],
-  foundMany: ['{Count} {plural} detected.', 'I count {count} {plural}.', '{Count} {plural} in view.'],
+  foundOne: ['{Article} {name} in view.', '{Article} {name} detected.', 'I have {article} {name}.'],
+  foundMany: ['{Count} {plural} in view.', 'I count {count} {plural}.'],
   reacquired: ['{Name} reacquired.'],
   lost: ['{Name} no longer in view.'],
   proximityNear: ['{Name} is very close.', '{Name} right ahead, {addr}.'],
@@ -183,39 +195,127 @@ export const LINES = {
   themeSwitch: ['Interface set to {theme} palette.'],
   scanStart: ['Running a full spectrum sweep.'],
   nothing: ['Nothing of interest in view, {addr}.'],
-  help: ['Tap the ring to switch optics. Hold the display to lock a target. Tap a bracket to query an object.']
+  help: ['Tap the ring to switch modes. Hold the display to lock. Tap an object for its full read.'],
+  // v2 voice: description with attributes
+  describe: ['{Article} {name}, {attributes}.'],
+  describeDistance: ['{Article} {name} at about {distance}.'],
+  materialRead: ['{Name}: {material}, {confidence} percent.'],
+  colourRead: ['{Name} reads as {colour}.'],
+  textFound: ['Text in view: {text}.'],
+  brandFound: ['That is a {name}.'],
+  poseFound: ['{Count} {plural} in view.'],
+  handsSeen: ['Hands detected: {gesture}.'],
+  sceneSummary: ['{Scene}. {Count} objects of interest.'],
+  teachPrompt: ['Select a box, then name the object. I will remember it.'],
+  teachStored: ['Learned: {name}. I will recognise it from now on.'],
+  teachForgotten: ['Forgotten: {name}.'],
+  watchAdded: ['Watching for {name}.'],
+  watchRemoved: ['No longer watching for {name}.'],
+  watchHit: ['{Name} in view.'],
+  hazardFound: ['Caution, {addr}: {note}'],
+  queryUnknown: ['I do not have that in view.'],
+  queryFound: ['{Name}, {position}, {distance}.'],
+  memoryReport: ['I have seen {count} {plural} today.'],
+  moduleLoading: ['Loading {module}.'],
+  moduleReady: ['{Module} online.'],
+  moduleFailed: ['{Module} failed to load.'],
+  detailReport: ['{name}. {attributes}. {extra}'],
+  noText: ['No readable text in view.'],
+  readOut: ['Reading: {text}.'],
+  movement: ['{Name} moving {direction}.'],
+  distanceReport: ['{Name} is about {distance} away.'],
+  conditionFound: ['{Name} looks {condition}. {note}'],
+  // guided search
+  findStart: ['Looking for {term}. I will guide you.', 'Searching for {term}. Turn slowly.'],
+  findCentred: ['{Name} is dead ahead{range}.'],
+  findTurn: ['{Name}{range} — turn {direction}.'],
+  findClosing: ['{Name} getting closer{range}.'],
+  findReceding: ['{Name} drifting away — look back.'],
+  findWait: ['Still looking for {term}. Sweep slowly left to right.'],
+  findStop: ['Stopped looking for {term}.'],
+  findFound: ['Found {term}{range}.'],
+  // relations
+  onSurface: ['On the {surface}: {items}.'],
+  onSurfaceEmpty: ['Nothing on the {surface}.'],
+  partOf: ['{Name} is on the {on}.']
 };
 
 /* ------------------------------------------------------------------ *
  * Settings
  * ------------------------------------------------------------------ */
-export const STORAGE_KEY = 'argus.settings.v1';
+
+export const STORAGE_KEY = 'argus.settings.v2';
+export const MEMORY_KEY = 'argus.memory.v2';
 
 export const DEFAULTS = {
+  // interface
   theme: 'arc',
-  minConfidence: 0.42,
-  scanSize: 416,              // 320 | 416 | 512 | 640
-  adaptive: true,             // step scan size with measured latency
-  maxDetections: 24,
+  hudStyle: 'standard',        // standard | glasses | minimal | debug
   showBoxes: true,
   showLabels: true,
   showConfidence: true,
-  showProximity: true,
-  showHud: true,
+  showAttributes: true,
+  showDistance: true,
+  showRadar: true,
   showReticle: true,
+  showScene: true,
+  showTicker: true,
+  subtitles: true,
   mirrorFront: true,
+  haptics: true,
+  units: 'metric',             // metric | imperial
+
+  // detector
+  minConfidence: 0.34,
+  scanSize: 416,               // 320 | 416 | 512 | 640
+  adaptive: true,
+  detailMode: 'off',           // off | auto | 4 | 9  (tiled inference)
+  maxDetections: 32,
+  backend: 'auto',             // auto | webgpu | wasm
+
+  // modules
+  moduleClassifier: true,
+  moduleOcr: true,
+  modulePose: true,
+  moduleHands: false,
+  classifyEvery: 700,          // ms between classifier passes per object
+  classifyTopK: 5,
+  classThreshold: 0.28,
+  ocrEvery: 2200,
+  ocrMinConfidence: 0.55,
+  poseEvery: 550,
+  handEvery: 700,
+  attributesEvery: 900,
+
+  // perception
+  fovHorizontal: 62,           // degrees — used by the range solver
+  fovCalibrated: false,
+  teachThreshold: 0.62,
+  appearanceSmoothing: 0.55,
+  trackMaxAge: 1400,
+
+  // agent
+  narration: 'standard',       // quiet | standard | chatty
+  address: 'sir',
   voiceEnabled: true,
-  voiceURI: '',               // '' = auto-pick best en-GB voice
+  voiceURI: '',
   voiceRate: 1.02,
   voicePitch: 0.92,
   voiceVolume: 1,
-  cadence: 'standard',        // quiet | standard | chatty
-  address: 'sir',             // how Argus addresses you
-  subtitles: true,
-  haptics: true,
   voiceCommands: false,
   autoLock: false,
-  backend: 'auto'             // auto | webgpu | wasm
+  alerts: true,
+  hazardAlerts: true,
+  watchlist: [],
+  narrateBrands: true,
+  narrateMaterials: true,
+  narrateDistance: true,
+  minTierToSpeak: 3,
+  captionsOnHud: true,
+
+  // I/O
+  captureFormat: 'png',
+  saveSessionLog: true
 };
 
 export function loadSettings() {
@@ -224,6 +324,8 @@ export function loadSettings() {
   const s = { ...DEFAULTS, ...stored };
   if (!THEMES[s.theme]) s.theme = DEFAULTS.theme;
   if (![320, 416, 512, 640].includes(Number(s.scanSize))) s.scanSize = DEFAULTS.scanSize;
+  if (!['standard', 'glasses', 'minimal', 'debug'].includes(s.hudStyle)) s.hudStyle = DEFAULTS.hudStyle;
+  if (!Array.isArray(s.watchlist)) s.watchlist = [];
   return s;
 }
 
@@ -246,19 +348,32 @@ export function applyTheme(themeKey) {
   return theme;
 }
 
-/* Small string helpers -------------------------------------------------- */
-export const plural = (word, n) => (n === 1 ? word : /(s|x|ch|sh)$/.test(word) ? `${word}es` : `${word}s`);
-export const titleCase = (s) => s.replace(/\b\w/g, (c) => c.toUpperCase());
+/* ------------------------------------------------------------------ *
+ * Helpers
+ * ------------------------------------------------------------------ */
+
+const AN_EXCEPTIONS = new Set(['airplane', 'apple', 'elephant', 'orange', 'umbrella', 'oven', 'iron', 'axe', 'inhaler', 'auger', 'hourglass', 'iPod', 'iPad', 'anti-static strap', 'exhaust fan', 'instant camera']);
+export const articleFor = (word) => (AN_EXCEPTIONS.has(word) || /^[aeiou]/i.test(String(word).trim()) ? 'an' : 'a');
+
+export const plural = (word, n) => {
+  if (n === 1) return word;
+  if (/(s|x|ch|sh|z)$/.test(word)) return `${word}es`;
+  if (/[^aeiou]y$/.test(word)) return `${word.slice(0, -1)}ies`;
+  return `${word}s`;
+};
+
+export const titleCase = (s) => String(s).replace(/\b\w/g, (c) => c.toUpperCase());
 export const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 export const lerp = (a, b, t) => a + (b - a) * t;
 export const now = () => performance.now();
 
-/** Fill {Placeholders} inside a phrase-bank line. */
 export function template(str, vars = {}) {
-  return str.replace(/\{(\w+)\}/g, (_, key) => {
+  return String(str).replace(/\{(\w+)\}/g, (_, key) => {
     if (key in vars) return vars[key];
     const lc = key.toLowerCase();
     if (lc in vars) return vars[lc];
+    const tc = key.charAt(0).toUpperCase() + key.slice(1).toLowerCase();
+    if (tc in vars) return vars[tc];
     return '';
   }).replace(/\s+([,.!?])/g, '$1').replace(/\s{2,}/g, ' ').trim();
 }
@@ -267,4 +382,27 @@ export function pick(list, seed) {
   if (!list || !list.length) return '';
   const i = seed === undefined ? Math.floor(Math.random() * list.length) : Math.abs(Math.floor(seed)) % list.length;
   return list[i];
+}
+
+/** Format a distance in the user's chosen units, with honest precision. */
+export function formatDistance(metres, units = 'metric') {
+  if (metres == null || !Number.isFinite(metres)) return '';
+  if (units === 'imperial') {
+    const feet = metres * 3.28084;
+    if (feet < 10) return `${feet.toFixed(1)} ft`;
+    return `${Math.round(feet)} ft`;
+  }
+  if (metres < 10) return `${metres.toFixed(1)} m`;
+  return `${Math.round(metres)} m`;
+}
+
+/** Bearing in words — used in spoken answers ("to your left"). */
+export function bearingWord(deg) {
+  const d = ((deg + 180) % 360) - 180;   // -180..180, negative = left of centre
+  const a = Math.abs(d);
+  if (a < 6) return 'dead ahead';
+  if (a < 18) return d < 0 ? 'slightly left' : 'slightly right';
+  if (a < 45) return d < 0 ? 'to your left' : 'to your right';
+  if (a < 80) return d < 0 ? 'well to your left' : 'well to your right';
+  return d < 0 ? 'hard left' : 'hard right';
 }

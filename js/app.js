@@ -1,1003 +1,1234 @@
 /**
- * app.js — ARGUS runtime.
+ * app.js — ARGUS boot, camera, frame loop and the glue between the agent
+ * modules.
  *
- * Boots the neural core, drives the camera + two render loops (60 Hz HUD,
- * adaptive-rate inference), owns target locking, capture, voice command
- * parsing and every control binding.
+ * The loop runs on two clocks on purpose. The display half runs every animation
+ * frame so brackets glide; the inference half runs when the previous pass has
+ * finished and enough time has elapsed, so a slow frame never blocks the HUD and
+ * a fast device is never throttled by a fixed timer. Everything that could stall
+ * a frame — model loads, OCR, pose — happens behind the previous result, with the
+ * HUD showing the last known state rather than a frozen screen.
  */
 
-import {
-  BUILD, CLASS_META, DEFAULTS, LINES, THEMES, VERSION,
-  applyTheme, loadSettings, pick, saveSettings, template, titleCase
-} from './config.js';
-import { Detector, MODEL_INFO } from './detector.js';
-import { Tracker } from './tracker.js';
-import { Voice, VoiceInput } from './speech.js';
-import { Installer, installGuide } from './install.js';
+import { Runtime } from './core.js';
+import { Pipeline } from './pipeline.js';
+import { Memory } from './memory.js';
 import { Hud, bindSettingsSheet } from './ui.js';
+import { Voice, VoiceInput } from './speech.js';
+import { Installer, installGuide, detectPlatform, isSecureContextOk } from './install.js';
+import { respond, describeRecord, matchRecord, Narrator } from './agent.js';
+import {
+  VERSION, loadSettings, saveSettings, applyTheme, resetSettings, LINES, THEMES,
+  pick, template, formatDistance, bearingWord, articleFor, categoryColour
+} from './config.js';
+import { stats as kbStats } from './kb.js';
 
-const SCAN_STEPS = [320, 416, 512, 640];
+/* ------------------------------------------------------------------ *
+ * State
+ * ------------------------------------------------------------------ */
 
-/**
- * Turn a runtime failure into a sentence a person can act on. The exact cause
- * still goes on the console and under the message — but the headline should not
- * be a raw emscripten abort.
- */
-function describeBootFailure(message) {
-  const m = String(message || '');
-  if (/stall|stopped responding|no response|unreachable/i.test(m)) {
-    return 'The runtime download stalled — this host stopped sending data.';
+const state = {
+  settings: null,
+  runtime: null,
+  pipeline: null,
+  memory: null,
+  hud: null,
+  voice: null,
+  voiceInput: null,
+  installer: null,
+  narrator: null,
+  video: null,
+  stream: null,
+  facing: 'environment',
+  paused: false,
+  lockedId: null,
+  lockedRecord: null,
+  frame: null,
+  frameCanvas: null,
+  frameCtx: null,
+  lastResult: null,
+  busy: false,
+  fps: 0,
+  battery: '—',
+  wakeLock: null,
+  demo: false,
+  demoTimer: null,
+  queryPending: null,
+  teachTarget: null,
+  startedAt: Date.now(),
+  captureCount: 0
+};
+
+const $ = (id) => document.getElementById(id);
+
+/* ------------------------------------------------------------------ *
+ * Boot
+ * ------------------------------------------------------------------ */
+
+async function boot() {
+  state.settings = loadSettings();
+  applyTheme(state.settings.theme);
+  document.body.dataset.hud = state.settings.hudStyle;
+  document.body.dataset.mirror = state.settings.mirrorFront ? '1' : '0';
+
+  state.voice = new Voice(() => state.settings, {
+    onCaption: (text, tone) => {
+      if (state.settings.subtitles) state.hud?.subtitle(text);
+      state.lastSpoken = text;
+    },
+    onLog: (msg) => log(msg)
+  });
+
+  state.installer = new Installer({
+    onState: (snap) => state.hud?.setInstall(snap, installGuide(detectPlatform())),
+    onLog: (msg) => log(msg)
+  });
+
+  state.memory = new Memory({ onLog: (msg) => log(msg) }).load();
+  state.narrator = new Narrator({ onLog: (msg) => log(msg) });
+
+  state.video = $('cam');
+  state.hud = new Hud({
+    canvas: $('hud'),
+    video: state.video,
+    getSettings: () => state.settings,
+    onSelect: (id) => openDetail(id)
+  });
+
+  state.hud.setBootStage('READING SETTINGS', 0.05);
+  log(`ARGUS ${VERSION} — ${new Date().toLocaleString()}`);
+  const kb = kbStats();
+  log(`vocabulary: ${kb.objects} objects, ${kb.aliases} aliases, ${kb.brands} brands — ${kb.vocabulary} names total`);
+
+  bindUI();
+
+  if (state.settings.voiceCommands && state.voiceInput?.supported) state.voiceInput.start({ continuous: true });
+
+  state.hud.setBootStage('CHECKING HARDWARE', 0.12);
+  if (!isSecureContextOk()) {
+    state.hud.bootError('Insecure context', 'Camera access requires https:// or localhost. Open the site over TLS, or use the demo feed.');
+    log('error: camera needs a secure context');
+    await offerDemo();
+    return;
   }
-  if (/HTTP \d|interrupted|truncated|too small|not a WebAssembly binary|failed verification/i.test(m)) {
-    return 'This host served a damaged or incomplete runtime file.';
+
+  let cameraOk = false;
+  try {
+    await startCamera(state.facing);
+    cameraOk = true;
+  } catch (err) {
+    log(`error: camera unavailable — ${err.message}`);
+    state.hud.bootError('Camera unavailable', `${err.message}. Grant camera permission, or run the demo feed.`);
+    await offerDemo();
+    return;
   }
-  if (/initWasm|no available backend|CompileError|backend/i.test(m)) {
-    return 'The compute runtime would not start on this device.';
-  }
-  return 'The neural core failed to initialise.';
+  if (!cameraOk) return;
+
+  await loadModels();
 }
 
-class Argus {
-  constructor() {
-    this.settings = loadSettings();
-    this.tracker = new Tracker({ iouThreshold: 0.28, maxAge: 1200, smooth: 0.5 });
-    this.detector = new Detector({ onLog: (m) => this.log(m) });
-    this.voice = new Voice(() => this.settings, {
-      onCaption: (t) => this.hud.subtitle(t),
-      onLog: (m) => this.log(m)
+async function loadModels() {
+  state.runtime = new Runtime({ onLog: (msg) => log(msg) });
+  state.pipeline = new Pipeline({
+    runtime: state.runtime,
+    settings: state.settings,
+    onLog: (msg) => log(msg),
+    onStatus: (module, status) => {
+      const chips = state.modulesStatus || (state.modulesStatus = {});
+      chips[module] = status === 'ready';
+      renderModules();
+    }
+  });
+  state.pipeline.teach = state.memory.teach;
+  state.pipeline.onVerified = verifySession;
+
+  try {
+    state.hud.setBootStage('LOADING COMPUTE RUNTIME', 0.2);
+    const info = await state.runtime.boot({
+      backend: state.settings.backend,
+      onStage: (stage, pct) => state.hud.setBootStage(stage, pct)
     });
-    this.hud = new Hud({
-      canvas: document.getElementById('hud'),
-      video: document.getElementById('cam'),
-      getSettings: () => this.settings
+    log(`compute: ${info.label}, ${info.threads} thread${info.threads > 1 ? 's' : ''}`);
+    state.backendLabel = `${info.label}${info.threads > 1 ? ` ×${info.threads}` : ''}`;
+
+    state.hud.setBootStage('LOADING DETECTOR', 0.45);
+    await state.pipeline.loadCore({
+      onProgress: (pct, msg) => state.hud.setBootStage(msg || 'LOADING DETECTOR', 0.45 + 0.25 * (pct || 0))
     });
-    this.video = document.getElementById('cam');
-    this.stream = null;
-    this.facing = 'environment';
-    this.running = false;
-    this.standby = false;
-    this.lockedId = null;
-    this.lockedSince = 0;
-    this.budget = Number(this.settings.scanSize) || 416;
-    this.lastInferMs = 0;
-    this.lastDims = null;
-    this.frameObjects = [];
-    this.fps = 0;
-    this._adaptClock = 0;
-    this._battery = '—';
-    this.minInterval = 24;
-    this.wakeLock = null;
-    this.voiceInput = null;
-    // Install surface: tracks the browser's install prompt, the display mode and
-    // the platform's real install route. Constructed eagerly so a
-    // `beforeinstallprompt` fired during boot is never missed.
-    this.installer = new Installer({
-      onState: (snapshot, reason) => this.hud.setInstall(snapshot, installGuide(snapshot.platform)),
-      onLog: (m, kind) => this.log(m, kind)
-    });
-    this._lastStatus = 0;
-    this._pressTimer = null;
-    this._lastTap = 0;
-    // Boot bookkeeping: _booting stops overlapping boots (retry spam),
-    // _retryBound/_bound keep the listeners installed exactly once.
-    this._booting = false;
-    this._retryBound = false;
-    this._bound = false;
+  } catch (err) {
+    log(`error: core load failed — ${err.message}`);
+    state.hud.bootError('Model load failed', err.message);
+    await offerDemo();
+    return;
   }
 
-  log(message, kind = 'sys') {
-    const lower = String(message);
-    const level = /^warn/.test(lower) ? 'warn' : /^err/.test(lower) ? 'err' : kind;
-    this.hud.logLine(lower, level);
-  }
-
-  /* ================================================================ *
-   * Boot
-   * ================================================================ */
-  /**
-   * Run one async boot stage, but never let it run forever. The load reports
-   * progress as it goes; if that progress stops for `idleMs` the stage is
-   * abandoned with a precise error, so a dropped connection or a runtime that
-   * never settles surfaces on screen instead of leaving a dead boot page.
-   */
-  async watchdog(run, { idleMs = 60000, label = 'the neural core', onStage = null } = {}) {
-    let arm = () => {};
-    let stop = () => {};
-    const guard = new Promise((_, reject) => {
-      let timer = null;
-      arm = () => {
-        clearTimeout(timer);
-        timer = setTimeout(() => reject(new Error(`${label} stopped responding — no progress for ${Math.round(idleMs / 1000)}s`)), idleMs);
-      };
-      stop = () => clearTimeout(timer);
-    });
-    const task = run((text, pct) => { arm(); if (onStage) onStage(text, pct); });
-    task.catch(() => {});                        // the guard may win the race
-    try { return await Promise.race([task, guard]); } finally { stop(); }
-  }
-
-  /**
-   * Bind the install controls immediately and mark them, so an operator can
-   * install the app even if the neural core never comes up. The generic
-   * `[data-act]` sweep in bindControls() skips anything already marked.
-   */
-  bindInstallButtons() {
-    for (const btn of document.querySelectorAll('[data-act="install"]')) {
-      if (btn.dataset.actBound) continue;
-      btn.dataset.actBound = '1';
-      btn.addEventListener('click', () => this.offerInstall());
-    }
-  }
-
-  async boot() {
-    if (this._booting) return;
-    this._booting = true;
-    this.theme = applyTheme(this.settings.theme);
-    this.hud.setTheme(this.settings.theme);
-    this.hud.showBoot();
-    // The only control that must survive a failure is the one that gets you out
-    // of it, so it is bound before anything can go wrong — exactly once.
-    if (!this._retryBound) {
-      const retryBtn = document.getElementById('boot-retry');
-      if (retryBtn) retryBtn.addEventListener('click', () => this.retryBoot());
-      this._retryBound = true;
-    }
-    this.hud.setBootStage('POST', 0.02);
-    // Installation is independent of inference: publish its state first, so the
-    // install controls work even when the neural core does not.
-    this.installer.refresh('boot-start');
-    this.bindInstallButtons();
-    this.hud.bootLine(`${BUILD} — start-up self test`);
-    this.hud.bootLine(`User agent: ${navigator.userAgent.slice(0, 70)}…`);
-    this.hud.bootLine(`Secure context: ${window.isSecureContext ? 'YES' : 'NO'} · WebGPU: ${Detector.webgpuAvailable ? 'AVAILABLE' : 'ABSENT'}`);
-    this.hud.bootLine(`Logical cores: ${navigator.hardwareConcurrency || 'unknown'} · isolated: ${self.crossOriginIsolated ? 'yes' : 'no'}`);
-
-    if (!window.isSecureContext) {
-      this._booting = false;
-      this.hud.bootError('Camera and neural inference require a secure context. Open this app over HTTPS (or localhost) — an http:// LAN address will not work.',
-        '', { core: false, label: 'HTTPS REQUIRED' });
-      this.hud.bootLine('err: insecure context — camera APIs blocked by the browser', 'err');
-      return;
-    }
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      this._booting = false;
-      this.hud.bootError('This browser exposes no camera API. Chrome, Edge, Samsung Internet or Safari 16+ on iOS are supported.',
-        '', { core: false, label: 'OPTICS UNAVAILABLE' });
-      return;
-    }
-
-    const t0 = performance.now();
-    const stage = (text, pct) => { this.hud.setBootStage(text, pct); this.hud.bootLine(text.toLowerCase()); };
-    try {
-      const result = await this.watchdog(
-        (report) => this.detector.load({
-          backend: this.settings.backend,
-          onStage: report,
-          onRetry: (tier, attempt) => {
-            this.hud.bootLine(`retry: ${tier.id} tier, attempt ${attempt} — fresh runtime, cache bypassed`, 'warn');
-            this.hud.setBootStage('RE-ARMING RUNTIME', 0.25);
-          }
-        }),
-        { idleMs: 60000, label: 'the compute runtime', onStage: stage }
-      );
-      this.hud.bootLine(`ok: ${MODEL_INFO.name} ready on ${result.backend} in ${result.loadMs} ms`);
-      this.hud.setBootStage('WARMING GRAPH', 0.97);
-      await this.watchdog(() => this.detector.warmup(this.budget), { idleMs: 45000, label: `the ${result.backend} graph` });
-      const total = Math.round(performance.now() - t0);
-      this.hud.bootLine(`ok: warm-up complete, total ${total} ms`);
-      this.hud.bootReady(`${MODEL_INFO.name.toUpperCase()} · ${result.backend.toUpperCase()} · ${total} MS BOOT`);
-      this.hud.setBootStage('NEURAL CORE ONLINE', 1);
-      this.log(`core online: ${MODEL_INFO.name} (${MODEL_INFO.onDisk}) via ${result.backend}, boot ${total}ms`);
-    } catch (err) {
-      this._booting = false;
-      const msg = (err && err.message) ? err.message : String(err);
-      this.hud.bootLine(`err: ${msg}`, 'err');
-      // One sentence the operator can act on, with the runtime's own wording
-      // kept underneath for anyone who wants it.
-      this.hud.bootError(describeBootFailure(msg), msg);
-      this.log(`err: neural core failed to initialise — ${msg}`);
-      return;
-    }
-
-    // Bindings are installed once: a successful retry must not double them up.
-    if (!this._bound) {
-      this.handleUrlIntent();
-      this.bindControls();
-      this.bindSettings();
-      this.bindGestures();
-      this.watchBattery();
-      this.watchVisibility();
-      this._bound = true;
-    }
-    this._booting = false;
-    this.installer.refresh('boot');
-    if (!this.installer.installed && this.installer.canPrompt) {
-      this.log('note: this browser can install ARGUS — tap INSTALL ARGUS NOW', 'ok');
-    } else if (!this.installer.installed) {
-      this.log(`note: install from the browser menu (${this.installer.platform}) — see the field manual`);
-    }
-    this.log('Awaiting optical engagement. Tap ENGAGE OPTICS.');
-  }
-
-  /* ================================================================ *
-   * Installation
-   * ================================================================ */
-  /**
-   * Where a Chromium browser raised its own install prompt we fire it, right
-   * here — that is a real one-tap install. Everywhere else (iOS above all,
-   * where the event does not exist) there is nothing to fire, so the honest
-   * move is to open the field manual on the exact steps for this platform.
-   */
-  async offerInstall() {
-    const snapshot = this.installer.refresh('operator');
-    if (snapshot.installed) {
-      this.hud.toast('Already running as an installed app', 'ok');
-      return;
-    }
-    if (!snapshot.secure) {
-      this.hud.toast('Installation needs HTTPS', 'warn');
-      this.log('install: blocked — this page is not a secure context', 'warn');
-    }
-    if (this.installer.canPrompt) {
-      const outcome = await this.installer.promptInstall();
-      if (outcome === 'accepted') this.hud.toast('Installing ARGUS…', 'ok', 4200);
-      else if (outcome === 'dismissed') this.hud.toast('Install dismissed — the manual route is in the manual', 'warn', 4200);
-      this.hud.setInstall(this.installer.snapshot(), installGuide(this.installer.platform));
-      return;
-    }
-    this.hud.openModal('help-modal');
-    this.log('install: opening the platform guide');
-  }
-
-  /* ================================================================ *
-   * Retry — the recovery path off a failed boot screen
-   * ================================================================ */
-  async retryBoot() {
-    if (this._booting) return;
-    this.hud.hideBootError();
-    this.hud.clearBootLines();
-    this.hud.bootLine('retry: relaunching neural core from scratch — all tiers, fresh downloads');
-    this.log('retry: operator requested a neural-core restart');
-    await this.boot();
-  }
-
-  /* ================================================================ *
-   * Engagement — camera + loops
-   * ================================================================ */
-  async engage() {
-    try {
-      await this.startCamera('environment');
-    } catch (err) {
-      const reason = `${err.name || 'CameraError'}: ${err.message}`;
-      this.hud.bootError(`Camera refused — ${reason}.`, 'Grant camera permission in the browser\'s site settings and reload, or run the bundled sample feed instead.',
-        { core: false, label: 'CAMERA BLOCKED' });
-      this.hud.bootLine(`err: ${err.message}`, 'err');
-      this.hud.offerDemoFallback();
-      return;
-    }
-    if (this.demoPending) await this.useDemoFeed();
-    this.startRuntime();
-  }
-
-  /** Engage using the bundled sample photograph — desktop, iframe, no camera. */
-  async engageDemo() {
-    this.hud.hideBootError();
-    await this.useDemoFeed();
-    this.startRuntime();
-  }
-
-  /** Shared tail of both engagement paths. */
-  startRuntime() {
-    this.hud.hideBoot();
-    this.running = true;
-    this.standby = false;
-    this.requestWakeLock();
-    this.hud.toast('Optics engaged', 'ok');
-    this.log('optical sensor engaged — scanning');
-    this.voice.say(this.voice.greeting(), { priority: 3, interrupt: true });
-    setTimeout(() => this.voice.say(pick(LINES.engage), { priority: 3 }), 3600);
-    this.loopHud();
-    this.tick();
-    if (this.pendingAction) {
-      const action = this.pendingAction;
-      this.pendingAction = null;
-      setTimeout(() => this.action(action), 2500);
-    }
-  }
-
-  async startCamera(facing) {
-    this.stopCamera();
-    const constraints = {
-      audio: false,
-      video: {
-        facingMode: { ideal: facing },
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        frameRate: { ideal: 30, max: 60 }
-      }
+  // Optional modules load in the background: the detector alone is a usable
+  // assistant, and the rest arrive without holding up first light.
+  // The model manifest is the contract between the shipped files and this code.
+  // Checking the digests turns "the fetch returned 200" into "these are the
+  // bytes that were tested".
+  state.modelManifest = await fetchManifest();
+  if (state.modelManifest) {
+    const expected = {
+      detector: state.modelManifest.models?.detector?.sha256,
+      classifier: state.modelManifest.models?.classifier?.sha256,
+      pose: state.modelManifest.models?.pose?.sha256,
+      hands: state.modelManifest.models?.hand?.sha256,
+      ocr: [state.modelManifest.models?.ocrDet?.sha256, state.modelManifest.models?.ocrRec?.sha256, state.modelManifest.models?.ocrCls?.sha256]
     };
-    const stream = await navigator.mediaDevices.getUserMedia(constraints);
-    this.stream = stream;
-    this.facing = facing;
-    this.video.srcObject = stream;
-    this.video.muted = true;
-    this.video.playsInline = true;
-    await this.video.play();
-    const track = stream.getVideoTracks()[0];
-    const caps = track.getCapabilities ? track.getCapabilities() : {};
-    this.torchSupported = !!caps.torch;
-    this.updateTorchButton();
-    const settings = track.getSettings ? track.getSettings() : {};
-    this.log(`camera: ${settings.width || '?'}x${settings.height || '?'} @${Math.round(settings.frameRate || 0)}fps, lens=${settings.facingMode || facing}${this.torchSupported ? ', torch available' : ''}`);
-    const w = this.video.videoWidth || 1280;
-    const h = this.video.videoHeight || 720;
-    this.frameW = w; this.frameH = h;
-    this.hud.resize();
-    this.tracker.reset();
-    this.lockedId = null;
+    state.expectedHashes = expected;
   }
 
-  stopCamera() {
-    if (this.stream) for (const track of this.stream.getTracks()) track.stop();
-    this.stream = null;
-    this.torchOn = false;
-  }
-
-  async switchCamera() {
-    const next = this.facing === 'environment' ? 'user' : 'environment';
-    try {
-      await this.startCamera(next);
-      this.voice.say(template(pick(LINES.cameraSwitch), { lens: next === 'user' ? 'front' : 'rear' }), { priority: 2 });
-      this.hud.toast(next === 'user' ? 'Front optics' : 'Rear optics', 'info');
-    } catch (err) {
-      this.hud.toast(`Lens switch failed: ${err.message}`, 'err');
+  state.hud.setBootStage('PERCEPTION MODULES', 0.75);
+  enableBySettings({ onProgress: (pct, msg) => {
+    if (msg) state.hud.bootStageHint = msg;
+  } }).then(() => {
+    const exp = state.expectedHashes || {};
+    verifySession(state.pipeline.detector.session, exp.detector);
+    verifySession(state.pipeline.classifier.session, exp.classifier);
+    verifySession(state.pipeline.pose.body, exp.pose);
+    verifySession(state.pipeline.pose.hand, exp.hands);
+    if (exp.ocr) {
+      verifySession(state.pipeline.ocr.det, exp.ocr[0]);
+      verifySession(state.pipeline.ocr.rec, exp.ocr[1]);
+      verifySession(state.pipeline.ocr.cls, exp.ocr[2]);
     }
-  }
+  }).catch((err) => log(`warn: module load — ${err.message}`));
 
-  /* ================================================================ *
-   * Loops
-   * ================================================================ */
-  loopHud() {
-    if (!this.running) return;
-    const mirrored = this.facing === 'user' && this.settings.mirrorFront;
-    this.hud.render({
-      tracks: this.tracker.tracks.filter((t) => t.missed === 0),
-      lockedId: this.lockedId,
-      mirrored,
-      frameW: this.frameW || this.video.videoWidth || 1280,
-      frameH: this.frameH || this.video.videoHeight || 720,
-      fps: this.fps,
-      inferMs: this.lastInferMs,
-      dims: this.lastDims,
-      backend: this.detector.backend,
-      battery: this._battery
-    });
-    this._hudRaf = requestAnimationFrame(() => this.loopHud());
-  }
-
-  async tick() {
-    if (!this.running) return;
-    const t0 = performance.now();
-    let res = null;
-    if (!this.standby && this.video.readyState >= 2) {
-      try {
-        res = await this.detector.infer(this.video, {
-          budget: this.budget,
-          confidence: this.settings.minConfidence,
-          iou: 0.45,
-          maxDetections: this.settings.maxDetections
-        });
-      } catch (err) {
-        this.log(`err: inference failed — ${err.message}`, 'err');
-        await new Promise((r) => setTimeout(r, 600));
-      }
-      const wall = performance.now() - t0;
-      if (res && !res.skipped) {
-        this.lastInferMs = res.inferMs;
-        this.lastDims = res.dims;
-        this.fps = wall > 0 ? 1000 / wall : 0;
-        try {
-          this.consume(res);
-          this.maybeAdapt(res.inferMs);
-        } catch (err) {
-          this.log(`warn: frame handling error — ${err.message}`);
-        }
-        // Duty-cycle pacing: keep the main thread ~40% free so the HUD stays
-        // smooth even when the WASM provider runs inference inline.
-        this.minInterval = Math.min(400, Math.max(12, wall * 0.55));
-      }
-    }
-    const spent = performance.now() - t0;
-    setTimeout(() => this.tick(), Math.max(4, this.minInterval - spent));
-  }
-
-  consume({ objects }) {
-    const frameW = this.frameW || this.video.videoWidth || 1;
-    const frameH = this.frameH || this.video.videoHeight || 1;
-    const area = frameW * frameH;
-    const seen = objects.map((o) => ({
-      cls: o.cls,
-      score: o.score,
-      box: o.box
-    }));
-    const { live, lost, born } = this.tracker.update(seen);
-    for (const tr of live) {
-      tr.area = ((tr.box[2] - tr.box[0]) * (tr.box[3] - tr.box[1])) / area;
-      tr.centre = [(tr.box[0] + tr.box[2]) / 2, (tr.box[1] + tr.box[3]) / 2];
-    }
-
-    // Did we lose the locked target?
-    if (this.lockedId !== null) {
-      const locked = this.tracker.tracks.find((t) => t.id === this.lockedId);
-      if (!locked) {
-        const gone = this._lockedSnapshot;
-        this.lockedId = null;
-        if (gone) this.voice.announceLoss(gone);
-        this.hud.toast('Target lost', 'warn');
-      }
-    }
-    const locked = this.tracker.tracks.find((t) => t.id === this.lockedId) || null;
-    if (locked) this._lockedSnapshot = { ...locked, box: locked.box.slice() };
-
-    // Auto-lock: grab the highest-interest object when idle.
-    if (this.settings.autoLock && !locked) {
-      const candidate = [...live]
-        .filter((t) => (CLASS_META[t.cls] || {}).priority === 3 && t.hits >= 4)
-        .sort((a, b) => (b.area || 0) - (a.area || 0) || b.score - a.score)[0];
-      if (candidate) this.lockTarget(candidate, { quiet: true });
-    }
-
-    this.frameObjects = live;
-    this.voice.narrate({ live, born, lost, locked });
-
-    // Haptics on fresh high-interest arrivals.
-    if (this.settings.haptics && navigator.vibrate) {
-      const spicy = born.find((tr) => (CLASS_META[tr.cls] || {}).priority === 3);
-      if (spicy && performance.now() - (this._lastBuzz || 0) > 1200) {
-        this._lastBuzz = performance.now();
-        navigator.vibrate(8);
-      }
-    }
-  }
-
-  maybeAdapt(inferMs) {
-    if (!this.settings.adaptive) return;
-    const t = performance.now();
-    if (t - this._adaptClock < 2500) return;
-    this._adaptClock = t;
-    const idx = SCAN_STEPS.indexOf(this.budget);
-    if (inferMs > 190 && idx > 0) {
-      this.budget = SCAN_STEPS[idx - 1];
-      this.log(`adapt: latency ${Math.round(inferMs)}ms — reducing scan to ${this.budget}px`);
-    } else if (inferMs < 65 && idx < SCAN_STEPS.length - 1 && this.budget < Number(this.settings.scanSize)) {
-      this.budget = SCAN_STEPS[idx + 1];
-      this.log(`adapt: latency ${Math.round(inferMs)}ms — raising scan to ${this.budget}px`);
-    }
-  }
-
-  async requestWakeLock() {
-    try {
-      if ('wakeLock' in navigator) this.wakeLock = await navigator.wakeLock.request('screen');
-    } catch { /* non-fatal */ }
-  }
-
-  watchVisibility() {
-    document.addEventListener('visibilitychange', async () => {
-      if (document.hidden) {
-        this.voice.stop();
-        this.log('paused — document hidden');
-      } else if (this.running) {
-        this.requestWakeLock();
-      }
-    });
-  }
-
-  async watchBattery() {
-    try {
-      if (!navigator.getBattery) return;
-      const b = await navigator.getBattery();
-      const update = () => { this._battery = `${Math.round(b.level * 100)}%${b.charging ? '+' : ''}`; };
+  state.hud.bootReady(`${state.pipeline.detector.info().name} · ${kbStats().objects} objects in vocabulary`);
+  startLoop();
+  registerServiceWorker();
+  greet();
+  if (navigator.getBattery) {
+    navigator.getBattery().then((b) => {
+      const update = () => { state.battery = `${Math.round(b.level * 100)}%${b.charging ? '⚡' : ''}`; };
       update();
       b.addEventListener('levelchange', update);
       b.addEventListener('chargingchange', update);
-    } catch { /* ignore */ }
+    }).catch(() => {});
   }
+}
 
-  /* ================================================================ *
-   * Targeting
-   * ================================================================ */
-  lockTarget(track, { quiet = false } = {}) {
-    const first = this.lockedId === null;
-    this.lockedId = track.id;
-    this.lockedSince = performance.now();
-    this._lockedSnapshot = { ...track, box: track.box.slice() };
-    track.acquireT = 0;
-    if (this.settings.haptics && navigator.vibrate) navigator.vibrate([12, 40, 12]);
-    if (!quiet) this.hud.toast(`Locked: ${(CLASS_META[track.cls] || {}).display || track.cls}`, 'ok');
-    this.voice.announceTarget(track, { reacquire: !first });
-    this.log(`lock: #${track.id} ${track.cls} ${(track.score * 100).toFixed(0)}%${first ? '' : ' (re-acquire)'}`, 'ok');
+async function fetchManifest() {
+  try {
+    const res = await fetch('models/manifest.json', { cache: 'force-cache' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    log(`note: model manifest unavailable (${err.message}) — integrity checks skipped`);
+    return null;
   }
+}
 
-  releaseLock({ quiet = false } = {}) {
-    if (this.lockedId === null) return;
-    this.lockedId = null;
-    this._lockedSnapshot = null;
-    if (!quiet) {
-      this.hud.toast('Lock released', 'info');
-      this.voice.say(pick(LINES.targetCleared), { priority: 2 });
+/** Compare a loaded session's digest with the manifest, once per model. */
+function verifySession(session, expected) {
+  if (!session || !expected) return;
+  const got = session.sha256;
+  if (!got) return;
+  if (got === expected) log(`verified: ${session.meta.label} sha256 ${got.slice(0, 12)}…`);
+  else log(`warn: ${session.meta.label} digest mismatch — expected ${expected.slice(0, 12)}…, got ${got.slice(0, 12)}…`);
+}
+
+async function offerDemo() {
+  const btn = $('demo-fallback');
+  if (btn) {
+    btn.hidden = false;
+    btn.onclick = () => startDemo();
+  }
+}
+
+function greet() {
+  const hour = new Date().getHours();
+  const key = hour < 12 ? 'greetingMorning' : hour < 18 ? 'greetingAfternoon' : hour < 23 ? 'greetingEvening' : 'greetingNight';
+  const line = template(pick(LINES[key]), { addr: state.settings.address });
+  state.voice.say(line, { priority: 2, once: 'greeting' });
+}
+
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.register('sw.js').then((reg) => {
+    log('service worker registered — models cache offline on first run');
+    reg.addEventListener?.('updatefound', () => log('update: new build found, will apply on next launch'));
+  }).catch((err) => log(`warn: service worker failed — ${err.message}`));
+}
+
+/* ------------------------------------------------------------------ *
+ * Camera
+ * ------------------------------------------------------------------ */
+
+async function startCamera(facing = state.facing) {
+  state.facing = facing;
+  const constraints = {
+    audio: false,
+    video: {
+      facingMode: facing === 'user' ? 'user' : { ideal: 'environment' },
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      frameRate: { ideal: 30, max: 60 }
     }
-  }
+  };
+  stopCamera();
+  state.stream = await navigator.mediaDevices.getUserMedia(constraints);
+  state.video.srcObject = state.stream;
+  await state.video.play();
+  requestWakeLock();
+  const track = state.stream.getVideoTracks()[0];
+  const caps = track.getSettings?.() || {};
+  log(`camera: ${caps.width || '?'}×${caps.height || '?'} @ ${caps.frameRate || '?'} fps, ${facing === 'user' ? 'front' : 'rear'}`);
+  // Mirror only the front camera — the rear camera's view is not a mirror.
+  document.body.dataset.mirror = (facing === 'user' && state.settings.mirrorFront) ? '1' : '0';
+  try {
+    const gpuCap = track.getCapabilities?.();
+    if (gpuCap?.torch) log('note: torch capability present — low light could use it');
+  } catch { /* not supported */ }
+  return track;
+}
 
-  hitTest(px, py) {
-    // px/py in canvas CSS pixels -> find the topmost track containing the point.
-    const s = this.settings;
-    const frameW = this.frameW || this.video.videoWidth || 1;
-    const frameH = this.frameH || this.video.videoHeight || 1;
-    const tf = this.hud.coverTransform(frameW, frameH);
-    const mirrored = this.facing === 'user' && s.mirrorFront;
-    const x = mirrored ? this.hud.w - px : px;
-    const candidates = this.tracker.tracks.filter((t) => t.missed === 0);
-    let best = null;
-    for (const tr of candidates) {
-      const b = [
-        tr.box[0] * tf.scale + tf.ox, tr.box[1] * tf.scale + tf.oy,
-        tr.box[2] * tf.scale + tf.ox, tr.box[3] * tf.scale + tf.oy
-      ];
-      if (x >= b[0] && x <= b[2] && py >= b[1] && py <= b[3]) {
-        if (!best || (tr.area || 0) < (best.area || 0)) best = tr;
+function stopCamera() {
+  if (state.stream) {
+    for (const track of state.stream.getTracks()) track.stop();
+    state.stream = null;
+  }
+}
+
+async function switchCamera() {
+  state.voice.say(template(pick(LINES.cameraSwitch), { lens: state.facing === 'user' ? 'forward' : 'self' }), { priority: 2, once: `cam-${Date.now()}` });
+  try {
+    await startCamera(state.facing === 'user' ? 'environment' : 'user');
+  } catch (err) {
+    log(`warn: camera switch failed — ${err.message}`);
+    state.hud.toast('Camera switch failed', 'warn');
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Frame grabbing
+ * ------------------------------------------------------------------ */
+
+function grabFrame() {
+  // Demo mode has no <video>: the same still frame is re-read every pass so the
+  // whole pipeline (detector, classifier, OCR, HUD) runs exactly as it would.
+  if (state.demoCanvas) return state.demoCanvas.getContext('2d').getImageData(0, 0, state.demoCanvas.width, state.demoCanvas.height);
+  const v = state.video;
+  if (!v || !v.videoWidth) return null;
+  // Work at a fixed processing width; the detector resizes internally anyway and
+  // a smaller buffer keeps the copy (the expensive part) cheap.
+  const target = Math.min(960, Math.max(480, state.settings.scanSize * 1.6));
+  const scale = target / v.videoWidth;
+  const w = Math.round(v.videoWidth * scale);
+  const h = Math.round(v.videoHeight * scale);
+  if (!state.frameCanvas) {
+    state.frameCanvas = document.createElement('canvas');
+    state.frameCtx = state.frameCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  const c = state.frameCanvas;
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+  state.frameCtx.drawImage(v, 0, 0, w, h);
+  try {
+    return state.frameCtx.getImageData(0, 0, w, h);
+  } catch (err) {
+    log(`warn: frame read failed — ${err.message}`);
+    return null;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Loop
+ * ------------------------------------------------------------------ */
+
+function startLoop() {
+  let last = performance.now();
+  let fpsAcc = 0;
+  let fpsCount = 0;
+  let lastInferAt = 0;
+
+  const tick = async (t) => {
+    requestAnimationFrame(tick);
+    const dt = t - last;
+    last = t;
+    fpsAcc += dt;
+    fpsCount++;
+    if (fpsAcc > 400) {
+      state.fps = 1000 / (fpsAcc / fpsCount);
+      fpsAcc = 0; fpsCount = 0;
+    }
+
+    if (state.paused || state.demoPending) {
+      state.hud.render(hudState());
+      return;
+    }
+
+    if (!state.busy && t - lastInferAt > 60) {
+      const frame = grabFrame();
+      if (frame) {
+        lastInferAt = t;
+        state.frame = frame;
+        state.busy = true;
+        runInference(frame, t).finally(() => { state.busy = false; });
       }
     }
-    return best;
-  }
+    state.hud.render(hudState());
+  };
+  requestAnimationFrame(tick);
+}
 
-  queryTrack(track) {
-    const meta = CLASS_META[track.cls] || { display: track.cls.toUpperCase() };
-    const area = track.area || 0;
-    const prox = area > 0.22 ? 'very close' : area > 0.07 ? 'at mid range' : 'distant';
-    const cat = (meta.category || 'object').toUpperCase();
-    this.voice.say(`${meta.display}. Confidence ${Math.round(track.score * 100)} percent. ${titleCase(prox)}, filling ${Math.round(area * 100)} percent of the frame. Class group ${cat}.`, { priority: 3, interrupt: true });
-    this.hud.toast(`${meta.display} · ${Math.round(track.score * 100)}% · ${prox}`, 'info');
-  }
+async function runInference(frame, t) {
+  try {
+    const result = await state.pipeline.processFrame(frame, { time: t });
+    state.lastResult = result;
 
-  /* ================================================================ *
-   * Capture
-   * ================================================================ */
-  snapshot({ download = true } = {}) {
-    const vw = this.video.videoWidth;
-    const vh = this.video.videoHeight;
-    if (!vw) { this.hud.toast('No frame to capture', 'warn'); return; }
-    const canvas = document.createElement('canvas');
-    canvas.width = vw;
-    canvas.height = vh;
-    const ctx = canvas.getContext('2d');
-    const mirrored = this.facing === 'user' && this.settings.mirrorFront;
-    const tf = this.hud.coverTransform(vw, vh);
-    ctx.save();
-    if (mirrored) { ctx.translate(vw, 0); ctx.scale(-1, 1); }
-    ctx.drawImage(this.video, 0, 0, vw, vh);
-    // The live overlay only covers the on-screen crop; map it back onto the
-    // full sensor frame so brackets land on the right pixels in the saved PNG.
-    const srcX = -tf.ox / tf.scale;
-    const srcY = -tf.oy / tf.scale;
-    const srcW = this.hud.w / tf.scale;
-    const srcH = this.hud.h / tf.scale;
-    ctx.drawImage(this.hud.canvas, 0, 0, this.hud.canvas.width, this.hud.canvas.height, srcX, srcY, srcW, srcH);
-    ctx.restore();
-
-    const stamp = new Date();
-    const pad = Math.round(vw * 0.018);
-    ctx.font = `600 ${Math.round(vw * 0.022)}px ui-monospace, Menlo, monospace`;
-    ctx.fillStyle = 'rgba(3,9,15,.72)';
-    const counts = new Map();
-    for (const tr of this.frameObjects) counts.set(tr.cls, (counts.get(tr.cls) || 0) + 1);
-    const summary = counts.size
-      ? [...counts.entries()].map(([c, n]) => `${n}× ${c.toUpperCase()}`).join('   ')
-      : 'NO OBJECTS OF INTEREST';
-    const line1 = `ARGUS CAPTURE · ${stamp.toISOString().replace('T', ' ').slice(0, 19)} UTC`;
-    const line2 = `${summary} · ${(counts.size ? this.frameObjects.length : 0)} TARGETS · ${this.detector.backend.toUpperCase()}`;
-    const width = Math.max(ctx.measureText(line1).width, ctx.measureText(line2).width);
-    ctx.fillRect(pad, vh - pad - Math.round(vw * 0.075), width + pad, Math.round(vw * 0.075));
-    ctx.fillStyle = this.theme.accent;
-    ctx.fillText(line1, pad * 1.5, vh - pad - Math.round(vw * 0.038));
-    ctx.fillStyle = 'rgba(223,246,255,.85)';
-    ctx.fillText(line2, pad * 1.5, vh - pad - Math.round(vw * 0.008));
-
-    const dataUrl = canvas.toDataURL('image/png');
-    const fileStamp = `${stamp.getFullYear()}${String(stamp.getMonth() + 1).padStart(2, '0')}${String(stamp.getDate()).padStart(2, '0')}-${String(stamp.getHours()).padStart(2, '0')}${String(stamp.getMinutes()).padStart(2, '0')}${String(stamp.getSeconds()).padStart(2, '0')}`;
-    this.hud.flash();
-    this.hud.addToFilmstrip(dataUrl, fileStamp);
-    if (download) {
-      const a = document.createElement('a');
-      a.href = dataUrl;
-      a.download = `argus-${fileStamp}.png`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-    }
-    this.hud.toast('Capture stored', 'ok');
-    this.voice.say(pick(LINES.captured), { priority: 1 });
-    this.log(`capture: argus-${fileStamp}.png (${counts.size} categories)`);
-  }
-
-  /* ================================================================ *
-   * Controls + gestures
-   * ================================================================ */
-  bindControls() {
-    document.getElementById('engage').addEventListener('click', () => this.engage());
-    const demoBtn = document.getElementById('demo-fallback');
-    if (demoBtn) demoBtn.addEventListener('click', () => this.engageDemo());
-    document.querySelectorAll('[data-act]').forEach((btn) => {
-      if (btn.dataset.actBound) return;              // bound early (install) or already done
-      btn.dataset.actBound = '1';
-      btn.addEventListener('click', () => this.action(btn.getAttribute('data-act')));
-    });
-    const canvas = this.hud.canvas;
-    canvas.addEventListener('pointerdown', (e) => {
-      this._downAt = { x: e.clientX, y: e.clientY, t: performance.now() };
-      this._longFired = false;
-      this._pressTimer = setTimeout(() => {
-        this._longFired = true;
-        this.statusReport();
-      }, 620);
-    });
-    canvas.addEventListener('pointerup', (e) => {
-      clearTimeout(this._pressTimer);
-      if (this._longFired) return;
-      if (!this._downAt) return;
-      const moved = Math.hypot(e.clientX - this._downAt.x, e.clientY - this._downAt.y);
-      const quick = performance.now() - this._downAt.t < 600;
-      if (moved > 24 || !quick) return;
-      const rect = canvas.getBoundingClientRect();
-      const track = this.hitTest(e.clientX - rect.left, e.clientY - rect.top);
-      const double = performance.now() - this._lastTap < 320;
-      this._lastTap = performance.now();
-      if (track) {
-        if (double) this.queryTrack(track);
-        else if (this.lockedId === track.id) this.releaseLock();
-        else this.lockTarget(track);
-      } else if (this.lockedId !== null) {
-        this.releaseLock();
-      } else {
-        this.hud.startSweep();
-        this.hud.toast('Wide scan', 'info', 1400);
-      }
-    });
-    window.addEventListener('keydown', (e) => {
-      if (e.target && /input|select|textarea/i.test(e.target.tagName)) return;
-      const k = e.key.toLowerCase();
-      if (k === ' ') { e.preventDefault(); this.snapshot(); }
-      if (k === 'l') this.autoSelectTarget();
-      if (k === 's') this.statusReport();
-      if (k === 'c') this.switchCamera();
-      if (k === 't') this.toggleTorch();
-      if (k === 'm') this.toggleVoice();
-      if (k === 'x') this.releaseLock();
-      if (k === 'h') this.hud.openModal('help-modal');
-      if (k === 'escape') { this.hud.closeModal('help-modal'); this.hud.closeModal('photo-modal'); }
-    });
-  }
-
-  action(name) {
-    switch (name) {
-      case 'camera': this.switchCamera(); break;
-      case 'torch': this.toggleTorch(); break;
-      case 'voice': this.toggleVoice(); break;
-      case 'snap': this.snapshot(); break;
-      case 'scan': this.hud.startSweep(); this.voice.say(pick(LINES.scanStart), { priority: 2 }); break;
-      case 'status': this.statusReport(); break;
-      case 'lock': this.autoSelectTarget(); break;
-      case 'standby': this.toggleStandby(); break;
-      case 'install': this.offerInstall(); break;
-      case 'help': this.hud.openModal('help-modal'); break;
-      case 'menu': this.toggleSheet('settings-sheet'); break;
-      case 'console': this.toggleSheet('console-sheet'); break;
-      case 'mic': this.toggleVoiceCommands(); break;
-      case 'reset': {
-        this.settings = { ...DEFAULTS };
-        saveSettings(this.settings);
-        this.budget = this.settings.scanSize;
-        this.theme = applyTheme(this.settings.theme);
-        this.hud.setTheme(this.settings.theme);
-        if (this.sheetSync) this.sheetSync();
-        this.hud.toast('Settings restored to defaults', 'ok');
-        this.log('settings reset to factory defaults');
-        break;
-      }
-      case 'test-voice':
-        this.voice._select();
-        this.voice.say(`Voice check. I am Argus, running ${MODEL_INFO.name} on ${this.detector.backend}. All systems nominal.`, { priority: 3, interrupt: true });
-        break;
-      case 'greet': this.voice.say(this.voice.greeting(), { priority: 3, interrupt: true }); break;
-      default: break;
-    }
-  }
-
-  autoSelectTarget() {
-    const live = this.tracker.tracks.filter((t) => t.missed === 0);
-    if (!live.length) { this.hud.toast('No targets in view', 'warn'); return; }
-    const ranked = [...live].sort((a, b) => {
-      const pa = (CLASS_META[a.cls] || { priority: 1 }).priority;
-      const pb = (CLASS_META[b.cls] || { priority: 1 }).priority;
-      return pb - pa || (b.area || 0) - (a.area || 0) || b.score - a.score;
-    });
-    const pickTarget = ranked.find((t) => t.id !== this.lockedId) || ranked[0];
-    this.lockTarget(pickTarget);
-  }
-
-  statusReport() {
-    this.voice.statusReport({
-      tracks: this.tracker.tracks.filter((t) => t.missed === 0),
-      backend: this.detector.backend,
-      inferMs: this.lastInferMs,
-      fps: this.fps,
-      scanLabel: this.lastDims ? `${this.lastDims.w} by ${this.lastDims.h}` : 'unknown'
-    });
-  }
-
-  toggleStandby() {
-    this.standby = !this.standby;
-    document.body.classList.toggle('standby', this.standby);
-    this.hud.toast(this.standby ? 'Standby — inference halted' : 'Scanning resumed', this.standby ? 'warn' : 'ok');
-    this.voice.say(this.standby ? 'Standing down optics. Say wake to resume.' : 'Optics back online.', { priority: 3, interrupt: true });
-    if (this.standby) this.tracker.reset();
-  }
-
-  async toggleTorch() {
-    if (!this.torchSupported) { this.hud.toast('No torch on this lens', 'warn'); return; }
-    try {
-      const track = this.stream.getVideoTracks()[0];
-      this.torchOn = !this.torchOn;
-      await track.applyConstraints({ advanced: [{ torch: this.torchOn }] });
-      this.hud.toast(this.torchOn ? 'Illuminator on' : 'Illuminator off', 'info');
-      document.body.classList.toggle('torch-on', this.torchOn);
-    } catch (err) {
-      this.hud.toast(`Torch failed: ${err.message}`, 'err');
-    }
-  }
-
-  updateTorchButton() {
-    const btn = document.querySelector('[data-act="torch"]');
-    if (btn) btn.classList.toggle('hidden', !this.torchSupported);
-  }
-
-  toggleVoice() {
-    this.settings.voiceEnabled = !this.settings.voiceEnabled;
-    saveSettings(this.settings);
-    if (this.sheetSync) this.sheetSync();
-    if (this.settings.voiceEnabled) this.voice.say(pick(LINES.unmuted), { priority: 3, interrupt: true });
-    else this.voice.say(pick(LINES.muted), { priority: 3, interrupt: true, caption: true }) || this.voice.stop();
-    this.hud.toast(this.settings.voiceEnabled ? 'Audio on' : 'Audio muted', 'info');
-    document.body.classList.toggle('muted', !this.settings.voiceEnabled);
-  }
-
-  toggleVoiceCommands() {
-    if (!this.voiceInput) {
-      this.voiceInput = new VoiceInput({
-        onFinal: (text) => this.handleCommand(text),
-        onInterim: (text) => { const el = document.getElementById('mic-interim'); if (el) el.textContent = text; },
-        onState: (active, err) => {
-          document.body.classList.toggle('mic-on', !!active);
-          if (err) this.hud.toast(`Microphone ${err}`, 'err');
+    // Lock follows the tracked identity, not the box.
+    if (state.lockedId != null) {
+      const match = result.records.find((r) => r.id === state.lockedId);
+      if (match) {
+        state.lockedRecord = match;
+        if (state.autoLockClaim !== state.lockedId) {
+          state.autoLockClaim = state.lockedId;
+          state.voice.say(template(LINES.targetAcquired, { name: match.label }), { priority: 1, once: `lock-${state.lockedId}` });
         }
+      } else if (state.lockedRecord && state.frameSeenWithout === undefined) {
+        state.frameSeenWithout = 0;
+      }
+    }
+
+    for (const record of result.records) {
+      const obs = state.memory.observe(record);
+      if (obs.novel && record.tier >= 3 && record.confidence > 0.5) {
+        state.memory.addTimeline({ kind: 'sighting', text: `First sighting: ${record.label}`, label: record.label });
+      }
+    }
+
+    // Guided search ("find my keys"): keep the user oriented instead of just
+    // repeating that the object is not in view.
+    const find = evaluateFind(result);
+
+    // Proactive narration.
+    const lines = state.narrator.evaluate(result, { settings: state.settings, memory: state.memory, paused: state.paused });
+    for (const line of lines) {
+      const spoken = normaliseForSpeech(line.text);
+      state.voice.say(spoken, { tone: line.tone === 'alert' ? 'alert' : 'info', priority: line.tone === 'alert' ? 3 : 1 });
+      state.lastSpoken = spoken;
+      if (line.tone === 'alert') state.hud.toast(spoken, 'alert');
+      if (line.record) state.tickerId = line.record.id;
+    }
+    if (find?.line) {
+      state.voice.say(normaliseForSpeech(find.line), { priority: find.found ? 2 : 1, tone: find.found ? 'good' : 'info' });
+      state.lastSpoken = find.line;
+    }
+    state.hud._tickerLine = lines[0]?.text || find?.line || state.lastSpoken || '';
+  } catch (err) {
+    log(`warn: frame failed — ${err.message}`);
+  }
+}
+
+/**
+ * Guided search loop. Once the user asks for something, every frame answers the
+ * only question that matters — which way to turn and whether it is getting
+ * closer — capped at one utterance every few seconds so it guides without
+ * chattering.
+ */
+function evaluateFind(result) {
+  const term = state.findTarget;
+  if (!term) return null;
+  const records = result?.records || [];
+  const rec = matchRecord(records, term);
+  const now = performance.now();
+  if (rec) {
+    const bearing = rec.distance?.bearing ?? 0;
+    const dist = rec.distance?.metres ?? null;
+    const range = dist != null ? `, about ${formatDistance(dist, state.settings.units)} away` : '';
+    let line = null;
+    if (now - (state.findLastSpoke || 0) > 3200) {
+      const prev = state.findPrev;
+      const direction = bearing > 0 ? 'right' : 'left';
+      line = Math.abs(bearing) < 8
+        ? template(pick(LINES.findCentred), { Name: rec.label, range })
+        : template(pick(LINES.findTurn), { Name: rec.label, range, direction });
+      if (prev?.dist != null && dist != null) {
+        if (dist < prev.dist - Math.max(0.15, prev.dist * 0.08)) line = template(pick(LINES.findClosing), { Name: rec.label, range });
+        else if (dist > prev.dist + Math.max(0.25, prev.dist * 0.15)) line = template(pick(LINES.findReceding), { Name: rec.label, range });
+      }
+      state.findLastSpoke = now;
+      state.findFound = true;
+    }
+    state.findPrev = { dist, bearing };
+    return { found: true, record: rec, line };
+  }
+  state.findPrev = { dist: null, bearing: null };
+  state.findFound = false;
+  if (now - (state.findLastSpoke || 0) > 9000) {
+    state.findLastSpoke = now;
+    return { found: false, line: template(pick(LINES.findWait), { term }) };
+  }
+  return { found: false, line: null };
+}
+
+function hudState() {
+  const result = state.lastResult;
+  const frame = state.frame ? { width: state.frame.width, height: state.frame.height } : null;
+  return {
+    frame,
+    records: result?.records || [],
+    texts: result?.texts || [],
+    scene: result?.scene || null,
+    lighting: result?.lighting || null,
+    timing: { detect: result?.timing?.detect || state.pipeline?.lastInferMs || 0 },
+    scanSize: result?.scanSize || state.settings.scanSize,
+    backend: state.backendLabel || '—',
+    fps: state.fps,
+    battery: state.battery,
+    modules: state.pipeline?.moduleState || {},
+    memorySummary: { taught: state.memory.teach.examples.length, known: state.memory.history.size },
+    lockedId: state.lockedId,
+    paused: state.paused,
+    facing: state.facing,
+    tickerLine: state.hud?._tickerLine || '',
+    find: state.findTarget ? { term: state.findTarget, line: state.findLine || '', found: !!state.findFound } : null,
+    lastSpoken: state.lastSpoken || ''
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * Query handling
+ * ------------------------------------------------------------------ */
+
+async function handleQuery(text, { spoken = false } = {}) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return;
+  log(`query: ${trimmed}`);
+  state.hud.subtitle(`“${trimmed}”`);
+
+  const ctx = {
+    records: state.lastResult?.records || [],
+    scene: state.lastResult?.scene,
+    lighting: state.lastResult?.lighting,
+    texts: state.lastResult?.texts || [],
+    memory: state.memory,
+    settings: state.settings,
+    locked: state.lockedRecord ? { record: state.lockedRecord } : null
+  };
+
+  const reply = respond(trimmed, ctx);
+  if (reply.action === 'status') {
+    const info = state.pipeline.info();
+    const summary = state.memory.summary();
+    const line = `${state.backendLabel}. ${state.fps.toFixed(0)} frames per second. Detector ${info.lastInferMs} milliseconds, scanning ${info.scanSize} pixels. ${summary.knownObjects} objects logged, ${summary.taught} taught. ${summary.watching} watch entries.`;
+    state.voice.say(line, { priority: 2 });
+    return;
+  }
+  if (reply.action === 'modules') {
+    const info = state.pipeline.info();
+    const on = Object.entries(state.pipeline.moduleState).filter(([, v]) => v).map(([k]) => k);
+    state.voice.say(`Online: ${on.join(', ')}. Detector ${info.models.detector.name}, classifier ${info.models.classifier.dataset}, OCR ${info.models.ocr.name}, pose ${info.models.pose.name}.`, { priority: 2 });
+    renderModules();
+    state.hud.openModal('modules-sheet');
+    return;
+  }
+
+  await applyAction(reply);
+  const spokenText = reply.detail?.summary || reply.say;
+  if (spokenText) {
+    state.voice.say(normaliseForSpeech(spokenText), { priority: spoken ? 2 : 2, tone: reply.tone === 'alert' ? 'alert' : 'info' });
+    state.lastSpoken = spokenText;
+  }
+}
+
+async function applyAction(reply) {
+  switch (reply.action) {
+    case 'highlight':
+      state.lockedId = reply.id ?? state.lockedId;
+      state.lockedRecord = (state.lastResult?.records || []).find((r) => r.id === reply.id) || state.lockedRecord;
+      break;
+    case 'lock': {
+      const rec = (state.lastResult?.records || []).find((r) => r.id === reply.id);
+      state.lockedId = reply.id ?? null;
+      state.lockedRecord = rec || null;
+      state.hud.toast(`Locked: ${rec?.label || 'target'}`, 'good');
+      break;
+    }
+    case 'unlock':
+      state.lockedId = null;
+      state.lockedRecord = null;
+      state.autoLockClaim = null;
+      state.hud.toast('Lock released', 'info');
+      break;
+    case 'capture':
+      await capture();
+      break;
+    case 'mute':
+      state.voice.setMuted(true);
+      state.hud.toast('Audio muted', 'warn');
+      break;
+    case 'unmute':
+      state.voice.setMuted(false);
+      state.hud.toast('Audio restored', 'good');
+      break;
+    case 'pause':
+      setPaused(true);
+      break;
+    case 'resume':
+      setPaused(false);
+      break;
+    case 'stop':
+      setPaused(true);
+      break;
+    case 'theme': {
+      const wanted = (reply.theme && Object.keys(THEMES).find((k) => k.includes(reply.theme))) || null;
+      if (wanted) {
+        state.settings.theme = wanted;
+        applyTheme(wanted);
+        saveSettings(state.settings);
+        syncSettingsSheet();
+      }
+      break;
+    }
+    case 'detail':
+      state.settings.detailMode = state.settings.detailMode === 'off' ? '4' : 'off';
+      saveSettings(state.settings);
+      syncSettingsSheet();
+      state.hud.toast(`Detail mode ${state.settings.detailMode === 'off' ? 'off' : 'on'}`, 'info');
+      break;
+    case 'fast':
+      state.settings.scanSize = 320;
+      state.settings.detailMode = 'off';
+      saveSettings(state.settings);
+      syncSettingsSheet();
+      state.hud.toast('Performance mode', 'info');
+      break;
+    case 'scan':
+      state.hud.toast('Full sweep — detail mode for one pass', 'info');
+      state.settings.detailMode = '9';
+      await new Promise((r) => setTimeout(r, 12000));
+      state.settings.detailMode = 'off';
+      syncSettingsSheet();
+      break;
+    case 'voice':
+      if (!state.voiceInput?.supported) { state.hud.toast('Voice input unsupported', 'warn'); break; }
+      state.voiceInput.start({ continuous: true });
+      state.hud.toast('Listening', 'good');
+      break;
+    case 'find': {
+      state.findTarget = reply.term;
+      state.findPrev = null;
+      state.findFound = false;
+      state.findLastSpoke = 0;
+      state.hud.toast(`Searching: ${reply.term}`, 'info');
+      break;
+    }
+    case 'unwatch':
+      if (state.findTarget && (!reply.term || String(state.findTarget).includes(String(reply.term)))) state.findTarget = null;
+      break;
+    case 'watch':
+      state.hud.toast(`Watching for ${reply.entry?.label || ''}`, 'good');
+      break;
+    case 'teach': {
+      const target = (state.lastResult?.records || []).find((r) => r.id === reply.id) || state.lockedRecord;
+      if (target) learnObject(target, reply.label);
+      break;
+    }
+    case 'teach-prompt':
+      state.teachTarget = (state.lastResult?.records || []).find((r) => r.id === reply.id) || null;
+      openTeach(state.teachTarget);
+      break;
+    case 'texts':
+      if (reply.texts?.length) state.hud.openModal('console-sheet');
+      break;
+    default:
+      break;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Persistence actions
+ * ------------------------------------------------------------------ */
+
+function learnObject(record, label, { thumb = null } = {}) {
+  if (!record) return null;
+  const embedding = record.embeddingVec || null;
+  if (!embedding) {
+    state.hud.toast('No appearance fingerprint yet — hold steady and retry', 'warn');
+    return null;
+  }
+  const entry = state.memory.learn({ label, embedding, category: null, tags: record.tags || [], note: record.note || '', crop: thumb });
+  state.hud.toast(`Learned: ${label}`, 'good');
+  state.voice.say(template(LINES.teachStored, { name: label }), { priority: 2 });
+  state.narrator.forget(label);
+  renderMemory();
+  return entry;
+}
+
+function setPaused(flag) {
+  state.paused = !!flag;
+  const btn = $('btn-pause');
+  if (btn) btn.textContent = state.paused ? 'RESUME' : 'PAUSE';
+  if (navigator.vibrate && state.settings.haptics) navigator.vibrate(12);
+}
+
+/* ------------------------------------------------------------------ *
+ * Capture
+ * ------------------------------------------------------------------ */
+
+async function capture() {
+  if (!state.frame) return;
+  const w = state.frame.width;
+  const h = state.frame.height;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  const src = document.createElement('canvas');
+  src.width = w; src.height = h;
+  src.getContext('2d').putImageData(state.frame, 0, 0);
+  ctx.drawImage(src, 0, 0);
+  // Draw the detection layer into the capture so a saved frame is self-explaining.
+  const hudCanvas = $('hud');
+  if (hudCanvas) {
+    try { ctx.drawImage(hudCanvas, 0, 0, w, h); } catch { /* ignore */ }
+  }
+  const stamp = new Date().toLocaleString();
+  const dataUrl = c.toDataURL(`image/${state.settings.captureFormat === 'jpg' ? 'jpeg' : 'png'}`, 0.92);
+  state.captureCount++;
+  state.hud.addToFilmstrip(dataUrl, stamp);
+  state.hud.flash();
+  state.voice.say(pick(LINES.captured), { priority: 1, once: `capture-${state.captureCount}` });
+  const records = state.lastResult?.records || [];
+  state.memory.addTimeline({ kind: 'capture', text: `Captured ${records.length} objects`, count: records.length });
+  if (state.settings.saveSessionLog) {
+    try {
+      const logKey = 'argus.captures.v2';
+      const list = JSON.parse(localStorage.getItem(logKey) || '[]');
+      list.push({
+        at: Date.now(),
+        objects: records.slice(0, 20).map((r) => ({
+          label: r.label, confidence: Number((r.confidence || 0).toFixed(3)),
+          colour: r.attributes?.colour?.name || null,
+          material: r.attributes?.material?.name || null,
+          distance: r.distance?.metres ? Number(r.distance.metres.toFixed(2)) : null,
+          text: r.text || null
+        })),
+        scene: state.lastResult?.scene?.label || null
       });
-    }
-    if (!this.voiceInput.supported) {
-      this.hud.toast('Voice commands need Chrome/Edge/Safari', 'warn');
-      return;
-    }
-    this.settings.voiceCommands = !this.settings.voiceCommands;
-    saveSettings(this.settings);
-    if (this.settings.voiceCommands) {
-      this.voiceInput.start();
-      this.voice.say(pick(LINES.voiceOn), { priority: 3, interrupt: true });
-      this.log('voice command channel open', 'ok');
-    } else {
-      this.voiceInput.stop();
-      this.voice.say(pick(LINES.voiceOff), { priority: 3 });
-      this.log('voice command channel closed');
-    }
-    if (this.sheetSync) this.sheetSync();
+      localStorage.setItem(logKey, JSON.stringify(list.slice(-60)));
+    } catch { /* storage full */ }
   }
+  state.hud.toast('Capture stored', 'good');
+}
 
-  /* ================================================================ *
-   * Voice command parsing — keyword grammar over the transcript.
-   * ================================================================ */
-  handleCommand(transcript) {
-    const text = transcript.toLowerCase().trim();
-    if (!text) return;
-    this.log(`voice: "${text}"`, 'voice');
-    const has = (...words) => words.some((w) => text.includes(w));
+/* ------------------------------------------------------------------ *
+ * Detail sheet
+ * ------------------------------------------------------------------ */
 
-    if (has('stand down', 'shut down', 'engine off', 'power down')) { if (!this.standby) this.toggleStandby(); return; }
-    if (has('wake up', 'wake', 'resume', 'engine on')) { if (this.standby) this.toggleStandby(); return; }
-    if (has('status', 'report', 'sit rep', 'sitrep', 'what do you see')) { this.statusReport(); return; }
-    if (/(stop|release|clear|drop)\s+(tracking|track|lock|target)/.test(text) || text === 'unlock') { this.releaseLock(); return; }
-    if (has('mute', 'quiet', 'silence', 'be quiet')) { if (this.settings.voiceEnabled) this.toggleVoice(); return; }
-    if (has('unmute', 'talk to me', 'speak to me')) { if (!this.settings.voiceEnabled) this.toggleVoice(); return; }
-    if (has('snapshot', 'capture', 'photo', 'picture', 'screenshot')) { this.snapshot(); return; }
-    if (has('torch', 'flashlight', 'illuminator', 'light on')) { this.toggleTorch(); return; }
-    if (has('switch camera', 'flip camera', 'front camera', 'selfie', 'rear camera', 'back camera')) { this.switchCamera(); return; }
-    if (has('sweep', 'rescan', 'scan now', 'full scan')) { this.hud.startSweep(); this.voice.say(pick(LINES.scanStart), { priority: 2 }); return; }
-    if (has('install', 'add to home screen', 'home screen')) { this.offerInstall(); return; }
-    if (has('help', 'commands', 'what can you do')) { this.voice.say(pick(LINES.help), { priority: 3, interrupt: true }); return; }
-    if (has('palette', 'theme', 'colour scheme', 'color scheme')) {
-      const wanted = Object.entries(THEMES).find(([key, t]) => text.includes(key) || text.includes(t.label.toLowerCase()));
-      const next = wanted ? wanted[0] : Object.keys(THEMES)[(Object.keys(THEMES).indexOf(this.settings.theme) + 1) % Object.keys(THEMES).length];
-      this.settings.theme = next;
-      saveSettings(this.settings);
-      this.theme = applyTheme(next);
-      this.hud.setTheme(next);
-      if (this.sheetSync) this.sheetSync();
-      this.voice.say(template(pick(LINES.themeSwitch), { theme: THEMES[next].label }), { priority: 3, interrupt: true });
-      return;
+function openDetail(id) {
+  const rec = (state.lastResult?.records || []).find((r) => r.id === id);
+  if (!rec) return;
+  state.lockedRecord = rec;
+  renderDetail(rec);
+  state.hud.openModal('detail-sheet');
+}
+
+function renderDetail(rec, { silent = false } = {}) {
+  const body = $('detail-body');
+  const title = $('detail-title');
+  const foot = $('detail-foot');
+  if (!body || !rec) return;
+  title.textContent = rec.label;
+  const thumb = state.frame ? state.pipeline.cropForDisplay(state.frame, rec.box, 128) : null;
+
+  const rows = [];
+  rows.push(['category', rec.category]);
+  rows.push(['confidence', `${Math.round((rec.confidence || 0) * 100)}% (${rec.source})`]);
+  if (rec.brand) rows.push(['brand', `${rec.brand.name}${rec.brand.exact ? '' : ' (partial match)'}`]);
+  if (rec.text) rows.push(['text read', `“${rec.text}”`]);
+  if (rec.attributes?.colour) rows.push(['colour', `${rec.attributes.colour.name} · ${rec.attributes.colour.hex} · hue ${rec.attributes.colour.hue}°`]);
+  if (rec.attributes?.finish) rows.push(['finish', rec.attributes.finish]);
+  if (rec.attributes?.pattern && rec.attributes.pattern.id !== 'solid') rows.push(['pattern', rec.attributes.pattern.label]);
+  if (rec.attributes?.shape?.form) rows.push(['shape', `${rec.attributes.shape.form} (fill ${Math.round(rec.attributes.shape.fill * 100)}%)`]);
+  if (rec.distance?.metres) {
+    rows.push(['distance', `${formatDistance(rec.distance.metres, state.settings.units)} (${formatDistance(rec.distance.min, state.settings.units)}–${formatDistance(rec.distance.max, state.settings.units)}, ${rec.distance.method})`]);
+    rows.push(['bearing', `${bearingWord(rec.distance.bearing)} (${rec.distance.bearing.toFixed(1)}°)`]);
+  }
+  if (rec.pose) rows.push(['posture', rec.posture || 'unknown']);
+  if (rec.activity) rows.push(['activity', rec.activity.label]);
+  if (rec.gesture) rows.push(['gesture', rec.gesture]);
+  if (rec.motion && rec.motion.id !== 'stationary') rows.push(['motion', `${rec.motion.label} (${Math.round(rec.motion.speed)} px/s)`]);
+  if (rec.tier) rows.push(['interest tier', String(rec.tier)]);
+  if (rec.note) rows.push(['note', rec.note]);
+  if (rec.hazard) rows.push(['hazard', rec.hazard.note || rec.hazard.kind]);
+  if (rec.taught) rows.push(['taught', `${rec.taught.label} · ${(rec.taught.score * 100).toFixed(0)}% match · ${rec.taught.samples} samples`]);
+  if (rec.age) rows.push(['tracked for', `${(rec.age / 1000).toFixed(1)} s`]);
+  if (rec.on) rows.push(['resting on', rec.on]);
+  if (rec.supports?.length) rows.push(['on it', rec.supports.join(', ')]);
+  if (rec.attributes?.samples) rows.push(['appearance reads', String(rec.attributes.samples)]);
+
+  const mats = (rec.attributes?.materials || []).slice(0, 4);
+  const cls = (rec.classifier || []).slice(0, 5);
+  const palette = rec.attributes?.colour?.palette || [];
+
+  body.innerHTML = `
+    <div class="detail-hero">
+      ${thumb ? `<img src="${thumb}" alt="object">` : ''}
+      <div>
+        <h3>${escapeHtml(rec.label)}</h3>
+        <p>${escapeHtml(rec.note || rec.category)}</p>
+        ${rec.hazard ? `<p style="color:#ff5b5b">⚠ ${escapeHtml(rec.hazard.note || rec.hazard.kind)}</p>` : ''}
+      </div>
+    </div>
+    <dl class="kv">${rows.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v))}</dd>`).join('')}</dl>
+    ${palette.length ? `<h3>Palette</h3><div class="swatches">${palette.map((p) => `<span class="swatch"><i style="background:${p.hex}"></i>${escapeHtml(p.name)} ${p.weight}%</span>`).join('')}</div>` : ''}
+    ${mats.length ? `<h3>Material composition</h3><div class="bars">${mats.map((m) => `<div class="bar"><span>${escapeHtml(m.name)}</span><i style="width:${Math.round(m.score * 100)}%"></i><em>${Math.round(m.score * 100)}%</em></div>`).join('')}</div>` : ''}
+    ${cls.length ? `<h3>Classifier</h3><div class="bars">${cls.map((c) => `<div class="bar"><span>${escapeHtml(c.name)}</span><i style="width:${Math.round(c.prob * 100)}%"></i><em>${Math.round(c.prob * 100)}%</em></div>`).join('')}</div>` : ''}
+    <div class="pill-row">
+      <span class="tag">id ${rec.id}</span>
+      <span class="tag">hits ${rec.hits}</span>
+      ${rec.tags?.length ? rec.tags.map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join('') : ''}
+    </div>
+  `;
+
+  foot.innerHTML = `
+    <button class="btn ghost" data-act="say">Read aloud</button>
+    <button class="btn ghost" data-act="teach">Teach</button>
+    <button class="btn ghost" data-act="watch">Watch for</button>
+    <button class="btn" data-act="lock">${state.lockedId === rec.id ? 'Unlock' : 'Lock'}</button>
+  `;
+  foot.querySelectorAll('[data-act]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const act = btn.dataset.act;
+      if (act === 'say') state.voice.say(describeRecord(rec, state.settings), { priority: 2 });
+      if (act === 'teach') openTeach(rec);
+      if (act === 'watch') { state.memory.watch(rec.label); state.hud.toast(`Watching for ${rec.label}`, 'good'); }
+      if (act === 'lock') {
+        if (state.lockedId === rec.id) { state.lockedId = null; state.lockedRecord = null; }
+        else { state.lockedId = rec.id; state.lockedRecord = rec; state.hud.toast(`Locked: ${rec.label}`, 'good'); }
+        renderDetail(rec);
+      }
+    });
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * Teach
+ * ------------------------------------------------------------------ */
+
+function openTeach(rec) {
+  if (!rec) { state.hud.toast('Select an object first', 'warn'); return; }
+  state.teachTarget = rec;
+  const preview = $('teach-preview');
+  const thumb = state.frame ? state.pipeline.cropForDisplay(state.frame, rec.box, 128) : null;
+  if (preview) preview.innerHTML = thumb ? `<img src="${thumb}" alt="teach">` : '';
+  const input = $('teach-label');
+  if (input) { input.value = ''; input.placeholder = `e.g. my ${rec.label}`; }
+  const suggest = $('teach-suggest');
+  if (suggest) {
+    const guesses = [rec.label, ...(rec.classifier || []).slice(0, 3).map((c) => c.name)].filter((v, i, a) => a.indexOf(v) === i);
+    suggest.innerHTML = guesses.map((g) => `<button data-g="${escapeHtml(g)}">${escapeHtml(g)}</button>`).join('');
+    suggest.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => { if (input) input.value = b.dataset.g; }));
+  }
+  state.hud.openModal('teach-sheet');
+}
+
+function confirmTeach() {
+  const input = $('teach-label');
+  const label = (input?.value || '').trim();
+  if (!label) { state.hud.toast('Type a name first', 'warn'); return; }
+  const rec = state.teachTarget;
+  const thumb = rec && state.frame ? state.pipeline.cropForDisplay(state.frame, rec.box, 96) : null;
+  if (rec) learnObject(rec, label, { thumb });
+  state.hud.closeModal('teach-sheet');
+}
+
+/* ------------------------------------------------------------------ *
+ * Sheets: memory / modules / console
+ * ------------------------------------------------------------------ */
+
+function renderMemory() {
+  const body = $('memory-body');
+  if (!body) return;
+  const summary = state.memory.summary();
+  const taught = state.memory.teach.labels();
+  const watch = state.memory.watchlist;
+  const recent = state.memory.recent(10);
+  body.innerHTML = `
+    <h3>Summary</h3>
+    <dl class="kv">
+      <dt>sessions</dt><dd>${summary.sessions}</dd>
+      <dt>objects known</dt><dd>${summary.knownObjects}</dd>
+      <dt>observations</dt><dd>${summary.observations}</dd>
+      <dt>taught</dt><dd>${summary.taught}</dd>
+      <dt>watching</dt><dd>${summary.watching}</dd>
+      <dt>hazards logged</dt><dd>${summary.hazards}</dd>
+    </dl>
+    <h3>Taught objects</h3>
+    ${taught.length ? taught.map((t) => `
+      <div class="mem-row">
+        <span><b>${escapeHtml(t.label)}</b><br><span>${t.samples} sample${t.samples > 1 ? 's' : ''}</span></span>
+        <span class="mem-actions"><button data-forget="${escapeHtml(t.label)}">Forget</button></span>
+      </div>`).join('') : '<p class="hint">Nothing taught yet. “Teach this as my inhaler.”</p>'}
+    <h3>Watchlist</h3>
+    ${watch.length ? watch.map((w) => `
+      <div class="mem-row">
+        <span><b>${escapeHtml(w.label)}</b><br><span>${w.hits} hit${w.hits === 1 ? '' : 's'}</span></span>
+        <span class="mem-actions"><button data-unwatch="${escapeHtml(w.term)}">Remove</button></span>
+      </div>`).join('') : '<p class="hint">Nothing on the watchlist.</p>'}
+    <h3>Recently seen</h3>
+    ${recent.length ? recent.map((r) => `
+      <div class="mem-row">
+        <span><b>${escapeHtml(r.label)}</b><br><span>${r.count}× · ${new Date(r.lastSeen).toLocaleTimeString()}</span></span>
+        <span class="mem-actions"><button data-count="${escapeHtml(r.label)}">Count</button></span>
+      </div>`).join('') : '<p class="hint">Nothing logged yet.</p>'}
+  `;
+  body.querySelectorAll('[data-forget]').forEach((b) => b.addEventListener('click', () => {
+    state.memory.forget(b.dataset.forget);
+    renderMemory();
+  }));
+  body.querySelectorAll('[data-unwatch]').forEach((b) => b.addEventListener('click', () => {
+    state.memory.unwatch(b.dataset.unwatch);
+    renderMemory();
+  }));
+  body.querySelectorAll('[data-count]').forEach((b) => b.addEventListener('click', () => {
+    const res = state.memory.countOf(b.dataset.count);
+    state.hud.toast(`${b.dataset.count}: ${res.total} sighting${res.total === 1 ? '' : 's'}`, 'info');
+  }));
+}
+
+function renderModules() {
+  const body = $('modules-body');
+  if (!body || !state.pipeline) return;
+  const info = state.pipeline.info();
+  const defs = [
+    ['detector', 'Detector', `${info.models.detector.name} · COCO-80, tiled detail pass`, true, null],
+    ['classifier', 'Classifier', `${info.models.classifier.name} · ${info.models.classifier.dataset} · ${info.counts.classifications} calls`, state.settings.moduleClassifier, 'classifier'],
+    ['ocr', 'Text & brands', `${info.models.ocr.name} · ${info.counts.ocrRuns} reads`, state.settings.moduleOcr, 'ocr'],
+    ['pose', 'Body pose', `${info.models.pose.name} · ${info.counts.poseRuns} passes`, state.settings.modulePose, 'pose'],
+    ['hands', 'Hands & gestures', 'YOLOv8n-hand int8 · 21 keypoints', state.settings.moduleHands, 'hands']
+  ];
+  body.innerHTML = defs.map(([key, name, detail, wanted, toggle]) => {
+    const ready = !!info.modules[key];
+    const klass = ready ? 'on' : wanted ? 'busy' : '';
+    const label = ready ? 'online' : wanted ? 'loading' : 'off';
+    return `<div class="module">
+      <div>
+        <h4>${name}</h4>
+        <p>${escapeHtml(detail)}</p>
+      </div>
+      <div style="text-align:right">
+        <span class="state ${klass}">${label}</span>
+        ${toggle ? `<div style="margin-top:6px"><button class="tag" data-toggle="${toggle}">${wanted ? 'disable' : 'enable'}</button></div>` : ''}
+      </div>
+    </div>`;
+  }).join('') + `<p class="hint">Vocabulary: ${kbStats().objects} objects, ${kbStats().imagenet} ImageNet classes, ${kbStats().brands} brands — ${kbStats().vocabulary} names in total. Taught examples: ${state.memory.teach.examples.length}.</p>`;
+
+  body.querySelectorAll('[data-toggle]').forEach((b) => b.addEventListener('click', async () => {
+    const mod = b.dataset.toggle;
+    const key = { classifier: 'moduleClassifier', ocr: 'moduleOcr', pose: 'modulePose', hands: 'moduleHands' }[mod];
+    state.settings[key] = !state.settings[key];
+    saveSettings(state.settings);
+    syncSettingsSheet();
+    if (state.settings[key]) {
+      b.textContent = 'loading…';
+      try { await state.pipeline.enable(mod); } catch (err) { log(`warn: ${mod} — ${err.message}`); }
     }
-    if (has('lock on', 'lock onto', 'track the', 'track a', 'target the')) {
-      const cls = Object.keys(CLASS_META).find((c) => text.includes(c));
-      if (cls) {
-        const candidates = this.tracker.tracks.filter((t) => t.missed === 0 && t.cls === cls);
-        if (candidates.length) {
-          const best = candidates.sort((a, b) => (b.area || 0) - (a.area || 0))[0];
-          this.lockTarget(best);
-        } else {
-          this.voice.say(`I have no ${cls} in view, ${this.settings.address || 'sir'}.`, { priority: 3, interrupt: true });
-        }
-        return;
+    renderModules();
+  }));
+}
+
+function renderConsole() {
+  const body = $('console-log');
+  if (body) body.scrollTop = body.scrollHeight;
+}
+
+function log(message) {
+  const line = String(message);
+  console.log(`[argus] ${line}`);
+  state.hud?.logLine(line, /^warn|error/.test(line) ? 'warn' : /^note/.test(line) ? 'note' : 'sys');
+}
+
+/* ------------------------------------------------------------------ *
+ * Settings
+ * ------------------------------------------------------------------ */
+
+let settingsSheet = null;
+
+function bindUI() {
+  settingsSheet = bindSettingsSheet(state.settings, {
+    onChange: onSettingChange,
+    onTheme: (theme) => {
+      state.settings.theme = theme;
+      applyTheme(theme);
+      saveSettings(state.settings);
+      state.hud.toast(`Theme: ${THEMES[theme]?.label || theme}`, 'info');
+    },
+    onAction: (action) => {
+      if (action === 'reset') {
+        state.settings = resetSettings();
+        applyTheme(state.settings.theme);
+        syncSettingsSheet();
+        state.hud.toast('Settings reset', 'good');
+      }
+      if (action === 'diagnostics') {
+        state.hud.openModal('console-sheet');
+        log(JSON.stringify(state.pipeline?.info() || {}, null, 1).slice(0, 1200));
       }
     }
-    const stripped = text.replace(/^(argus|hey argus|jarvis|computer|assistant)[ ,]+/, '');
-    if (stripped !== text) this.log(`voice: addressed — no matching action`, 'warn');
-  }
+  });
+  syncSettingsSheet();
 
-  /* ================================================================ *
-   * Settings + sheets
-   * ================================================================ */
-  bindSettings() {
-    // bindSettingsSheet returns { sync }; keep the function itself so callers
-    // can simply do `if (this.sheetSync) this.sheetSync()`.
-    const sheet = bindSettingsSheet(this.settings, {
-      onChange: (key, value) => {
-        saveSettings(this.settings);
-        switch (key) {
-          case 'theme': {
-            this.theme = applyTheme(value);
-            this.hud.setTheme(value);
-            this.voice.say(template(pick(LINES.themeSwitch), { theme: THEMES[value].label }), { priority: 1 });
-            break;
-          }
-          case 'scanSize': this.budget = Number(value); break;
-          case 'voiceURI': this.voice._select(); break;
-          case 'voiceCommands': this.toggleVoiceCommands(); break;
-          default: break;
-        }
-      },
-      onTheme: () => {},
-      onAction: (name) => this.action(name)
-    });
-    this.sheetSync = sheet.sync;
-    const voiceList = document.getElementById('voice-list');
-    const populateVoices = () => {
-      if (!voiceList) return;
-      const voices = this.voice.voices.filter((v) => /^en/i.test(v.lang));
-      voiceList.innerHTML = ['<option value="">Auto (best British voice)</option>']
-        .concat(voices.map((v) => `<option value="${v.voiceURI}"${v.voiceURI === this.settings.voiceURI ? ' selected' : ''}>${v.name} — ${v.lang}${v.localService ? ' · offline' : ' · network'}</option>`))
-        .join('');
-    };
-    populateVoices();
-    setTimeout(populateVoices, 1200);
-    const info = document.getElementById('model-info');
-    if (info) {
-      info.innerHTML = Object.entries({
-        'Model': `${MODEL_INFO.name} (${MODEL_INFO.classes} classes)`,
-        'Backbone': MODEL_INFO.architecture,
-        'Training data': MODEL_INFO.dataset,
-        'Parameters': MODEL_INFO.params.toLocaleString('en-GB'),
-        'ONNX opset': String(MODEL_INFO.opset),
-        'Weights on disk': MODEL_INFO.onDisk,
-        'Runtime': 'onnxruntime-web 1.20.1 (WebGPU → WASM fallback)',
-        'Execution provider': this.detector.backend,
-        'Build': BUILD
-      }).map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
+  $('btn-settings')?.addEventListener('click', () => { syncSettingsSheet(); state.hud.openModal('settings-sheet'); });
+  $('btn-console')?.addEventListener('click', () => { renderConsole(); state.hud.openModal('console-sheet'); });
+  $('btn-memory')?.addEventListener('click', () => { renderMemory(); state.hud.openModal('memory-sheet'); });
+  $('btn-modules')?.addEventListener('click', () => { renderModules(); state.hud.openModal('modules-sheet'); });
+  $('btn-mic')?.addEventListener('click', () => onMic());
+  $('btn-ask')?.addEventListener('click', submitQuery);
+  $('query-input')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') submitQuery(); });
+  $('engage')?.addEventListener('click', switchCamera);
+  $('shutter')?.addEventListener('click', capture);
+  $('btn-pause')?.addEventListener('click', () => setPaused(!state.paused));
+  $('btn-detail')?.addEventListener('click', async () => {
+    state.settings.detailMode = state.settings.detailMode === 'off' ? '4' : state.settings.detailMode === '4' ? '9' : 'off';
+    saveSettings(state.settings);
+    syncSettingsSheet();
+    state.hud.toast(`Detail: ${state.settings.detailMode}`, 'info');
+  });
+  $('btn-mode-scan')?.addEventListener('click', () => {
+    const sizes = [320, 416, 512, 640];
+    const i = sizes.indexOf(Number(state.settings.scanSize));
+    state.settings.scanSize = sizes[(i + 1) % sizes.length];
+    saveSettings(state.settings);
+    syncSettingsSheet();
+    state.hud.toast(`Scan size ${state.settings.scanSize}px`, 'info');
+  });
+  $('teach-save')?.addEventListener('click', confirmTeach);
+  $('teach-cancel')?.addEventListener('click', () => state.hud.closeModal('teach-sheet'));
+  $('memory-export')?.addEventListener('click', exportMemory);
+  $('memory-import')?.addEventListener('click', importMemory);
+  $('memory-clear')?.addEventListener('click', () => {
+    if (confirm('Forget every taught object and all history?')) {
+      state.memory.clear();
+      renderMemory();
+      state.hud.toast('Memory cleared', 'warn');
     }
-    // Install copy is rendered by Hud.setInstall() from the installer's live
-    // state, so there is one source of truth for it.
-    const swStatus = document.getElementById('sw-status');
-    if (swStatus) {
-      swStatus.textContent = 'serviceWorker' in navigator
-        ? (navigator.onLine ? 'online · cache warming' : 'offline · running from cache')
-        : 'service worker unavailable in this browser';
+  });
+
+  const voiceList = $('set-voiceuri');
+  if (voiceList) {
+    voiceList.innerHTML = '<option value="">System default</option>';
+    setTimeout(() => {
+      const voices = state.voice.listVoices();
+      for (const v of voices) {
+        const opt = document.createElement('option');
+        opt.value = v.uri;
+        opt.textContent = `${v.name} (${v.lang})`;
+        voiceList.appendChild(opt);
+      }
+    }, 800);
+  }
+
+  state.voiceInput = new VoiceInput({
+    onFinal: (text) => { if (text) handleQuery(text, { spoken: true }); },
+    onInterim: (text) => state.hud.subtitle(`… ${text}`),
+    onState: (s) => {
+      const mic = $('btn-mic');
+      if (mic) mic.style.borderColor = s === 'listening' ? '#6dff9b' : '';
+    },
+    onLog: (msg) => log(msg)
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      state.voice.flush();
+      state.paused = true;
+    } else {
+      state.paused = false;
+      setPaused(false);
     }
-    const greeting = document.getElementById('address-input');
-    if (greeting) greeting.addEventListener('change', () => { saveSettings(this.settings); });
-  }
+  });
 
-  /** Manifest shortcuts and deep links: ?action=capture|status|settings|demo */
-  handleUrlIntent() {
-    const params = new URLSearchParams(location.search);
-    const action = params.get('action');
-    if (params.get('demo') !== null || action === 'demo') this.demoPending = true;
-    if (action === 'settings') this.toggleSheet('settings-sheet');
-    if (action === 'console') this.toggleSheet('console-sheet');
-    if (action === 'capture') this.pendingAction = 'snap';
-    if (action === 'status') this.pendingAction = 'status';
-    if (action) this.log(`deep link: action=${action}`);
-  }
+  // Handle manifest shortcuts: ?action=capture|status|settings
+  const action = new URLSearchParams(window.location.search || '').get('action');
+  if (action === 'capture') setTimeout(() => capture(), 2500);
+  if (action === 'status') setTimeout(() => handleQuery('status'), 2500);
+  if (action === 'settings') setTimeout(() => state.hud.openModal('settings-sheet'), 1200);
+}
 
-  /**
-   * Desktop / no-camera fallback: feed the bundled sample photograph through
-   * the same pipeline so the whole stack can be exercised on a laptop.
-   */
-  async useDemoFeed() {
+function onMic() {
+  if (!state.voiceInput?.supported) {
+    state.hud.toast('Voice input needs Chrome or Safari', 'warn');
+    return;
+  }
+  state.voiceInput.toggle();
+  state.hud.subtitle('Listening…');
+}
+
+function submitQuery() {
+  const input = $('query-input');
+  if (!input) return;
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  if (state.teachTarget && $('teach-sheet')?.classList.contains('open')) {
+    if (input) input.value = text;
+    return;
+  }
+  handleQuery(text);
+}
+
+function onSettingChange(key, value) {
+  saveSettings(state.settings);
+  switch (key) {
+    case 'hudStyle':
+      document.body.dataset.hud = value;
+      break;
+    case 'mirrorFront':
+      document.body.dataset.mirror = (state.settings.mirrorFront && state.facing === 'user') ? '1' : '0';
+      break;
+    case 'voiceEnabled':
+      if (!value) state.voice.flush();
+      break;
+    case 'voiceURI':
+      state.voice._loadVoices();
+      break;
+    case 'backend':
+      log('note: backend change applies on next launch');
+      break;
+    case 'moduleClassifier':
+    case 'moduleOcr':
+    case 'modulePose':
+    case 'moduleHands': {
+      const module = { moduleClassifier: 'classifier', moduleOcr: 'ocr', modulePose: 'pose', moduleHands: 'hands' }[key];
+      if (value) state.pipeline.enable(module).then(() => renderModules()).catch((err) => log(`warn: ${module} — ${err.message}`));
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+function syncSettingsSheet() {
+  settingsSheet?.sync();
+}
+
+/* ------------------------------------------------------------------ *
+ * Memory import / export
+ * ------------------------------------------------------------------ */
+
+function exportMemory() {
+  const blob = new Blob([state.memory.export()], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `argus-memory-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  state.hud.toast('Memory exported', 'good');
+}
+
+function importMemory() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'application/json';
+  input.onchange = async () => {
+    const file = input.files?.[0];
+    if (!file) return;
     try {
-      const img = new Image();
-      img.src = 'tools/sample-bus.jpg';
-      await img.decode();
-      const canvas = document.createElement('canvas');
-      canvas.width = img.naturalWidth;
-      canvas.height = img.naturalHeight;
-      canvas.getContext('2d').drawImage(img, 0, 0);
-      const stream = canvas.captureStream(24);
-      this.stopCamera();
-      this.video.srcObject = stream;
-      await this.video.play();
-      this.stream = stream;
-      this.frameW = canvas.width;
-      this.frameH = canvas.height;
-      this.hud.resize();
-      this.tracker.reset();
-      this.hud.toast('Demo feed engaged — sample photograph', 'warn', 4200);
-      this.log('demo: sample photograph streaming through the live pipeline');
+      const result = state.memory.import(await file.text());
+      state.pipeline.teach = state.memory.teach;
+  state.pipeline.onVerified = verifySession;
+      renderMemory();
+      state.hud.toast(`Imported ${result.taught} taught, ${result.known} known`, 'good');
     } catch (err) {
-      this.log(`warn: demo feed unavailable (${err.message})`);
+      state.hud.toast(`Import failed: ${err.message}`, 'alert');
     }
-  }
+  };
+  input.click();
+}
 
-  toggleSheet(id) {
-    const el = document.getElementById(id);
-    if (!el) return;
-    const wasOpen = el.classList.contains('open');
-    document.querySelectorAll('.sheet').forEach((s) => s.classList.remove('open'));
-    if (!wasOpen) el.classList.add('open');
-  }
+/* ------------------------------------------------------------------ *
+ * Demo feed (no camera: uses the bundled sample frame)
+ * ------------------------------------------------------------------ */
 
-  bindGestures() {
-    const stage = document.getElementById('stage');
-    let startY = null;
-    stage.addEventListener('touchstart', (e) => { startY = e.touches[0].clientY; }, { passive: true });
-    stage.addEventListener('touchend', (e) => {
-      if (startY === null) return;
-      const dy = e.changedTouches[0].clientY - startY;
-      const fromBottom = e.changedTouches[0].clientY > window.innerHeight * 0.72;
-      if (dy < -90 && fromBottom) this.toggleSheet('settings-sheet');
-      if (dy > 90 && document.querySelector('.sheet.open')) document.querySelectorAll('.sheet').forEach((s) => s.classList.remove('open'));
-      startY = null;
-    }, { passive: true });
+async function startDemo() {
+  log('demo: using bundled sample frame — no camera');
+  state.demo = true;
+  state.hud.hideBootError();
+  $('boot').hidden = true;   // skip the boot screen: models already loaded or will fail loudly
+  if (!state.pipeline) {
+    await loadModels();
   }
+  const img = new Image();
+  img.src = 'tools/sample-bus.jpg';
+  await img.decode().catch(() => {});
+  const w = img.naturalWidth || 640;
+  const h = img.naturalHeight || 480;
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.getContext('2d').drawImage(img, 0, 0, w, h);
+  state.demoCanvas = c;
+  $('stage').hidden = false;
+  state.paused = false;
+  state.hud.hideBoot();
+  state.hud.toast('Demo feed active — bundled still frame', 'info');
+  log('demo: still frame feeding the full pipeline');
+}
+
+/* ------------------------------------------------------------------ *
+ * Lifecycle helpers
+ * ------------------------------------------------------------------ */
+
+async function requestWakeLock() {
+  try {
+    state.wakeLock = await navigator.wakeLock?.request('screen');
+    log('screen wake lock held');
+  } catch { /* not fatal */ }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) requestWakeLock();
+});
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/** Speech-friendly text: expand symbols the synthesiser reads badly. */
+function normaliseForSpeech(text) {
+  return String(text)
+    .replace(/·/g, ',')
+    .replace(/%/g, ' percent')
+    .replace(/&/g, ' and ')
+    .replace(/“|”/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function enableBySettings({ onProgress } = {}) {
+  const modules = [];
+  if (state.settings.moduleClassifier) modules.push('classifier');
+  if (state.settings.moduleOcr) modules.push('ocr');
+  if (state.settings.modulePose) modules.push('pose');
+  if (state.settings.moduleHands) modules.push('hands');
+  return state.pipeline.enableAll({ modules, onProgress: (pct, msg) => onProgress?.(pct, msg) });
 }
 
 /* ------------------------------------------------------------------ *
  * Start
  * ------------------------------------------------------------------ */
-const argus = new Argus();
-window.argus = argus;                     // debug handle
-document.getElementById('boot-ver').textContent = `v${VERSION}`;
-argus.boot();
 
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js').then((reg) => {
-      argus.log('service worker registered — offline cache active');
-      reg.addEventListener('updatefound', () => argus.hud.toast('Update available — reload to apply', 'info', 4000));
-    }).catch((err) => argus.log(`warn: service worker failed (${err.message})`));
+window.addEventListener('error', (event) => log(`error: ${event.message}`));
+window.addEventListener('unhandledrejection', (event) => log(`warn: unhandled rejection — ${event.reason?.message || event.reason}`));
 
-    // The worker revalidates cached code in the background; when it spots a
-    // change it tells us, so the user is never silently running an old build.
-    navigator.serviceWorker.addEventListener('message', (event) => {
-      const data = event.data;
-      if (!data || data.type !== 'argus-update-cached') return;
-      if (argus._updateNotified) return;
-      argus._updateNotified = true;
-      argus.log(`update: newer build cached (${data.url}) — reload to apply`, 'ok');
-      argus.hud.toast('New build cached — reload to apply', 'ok', 5200);
-    });
+function start() {
+  boot().catch((err) => {
+    log(`error: boot failed — ${err.stack || err.message}`);
+    const box = document.getElementById('boot-error');
+    if (box) box.hidden = false;
+    const detail = document.getElementById('boot-detail');
+    if (detail) detail.textContent = err.message;
+    const demo = document.getElementById('demo-fallback');
+    if (demo) demo.hidden = false;
   });
 }
+
+// A module script runs before DOMContentLoaded, but if the page was already
+// parsed (slow module graph, bfcache restore) starting from readyState is safer
+// than waiting for an event that has already fired.
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+else start();
+
+export { state, start, handleQuery, capture, learnObject, normaliseForSpeech };
