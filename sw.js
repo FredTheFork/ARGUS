@@ -2,10 +2,11 @@
  * sw.js — ARGUS offline shell.
  *
  * Pre-caches the whole application — HTML, CSS, ES modules, the
- * onnxruntime-web runtime, both WASM binaries and the 12.7 MB YOLOv8-nano
- * weights — so the assistant works with no network at all after the first
- * visit. Range requests are answered from cache because some WebKit builds
- * stream large binaries that way.
+ * onnxruntime-web runtime, both WASM binaries and the model suite (detector,
+ * 1000-class classifier, PP-OCRv4 text pipeline, pose and hands, ~47 MB) so
+ * the assistant works with no network at all after the first visit. Range
+ * requests are answered from cache because some WebKit builds stream large
+ * binaries that way.
  *
  * Two rules stop this cache from ever pinning the app to a broken boot:
  *
@@ -19,7 +20,7 @@
  *      (message type 'argus-purge') once the runtime has proved it unusable.
  */
 
-const VERSION = 'argus-1.0.2';   // bump to force a full re-cache on the next launch
+const VERSION = 'argus-2.0.0';   // bump to force a full re-cache on the next launch
 const CORE = `${VERSION}-core`;
 const RUNTIME = `${VERSION}-runtime`;
 const MODELS = `${VERSION}-models`;
@@ -31,11 +32,27 @@ const CORE_ASSETS = [
   './css/app.css',
   './js/app.js',
   './js/config.js',
+  './js/core.js',
+  './js/kb.js',
   './js/detector.js',
-  './js/install.js',
+  './js/classify.js',
+  './js/ocr.js',
+  './js/pose.js',
+  './js/attributes.js',
   './js/tracker.js',
+  './js/pipeline.js',
+  './js/memory.js',
+  './js/agent.js',
+  './js/install.js',
   './js/speech.js',
   './js/ui.js',
+  './js/data/imagenet.js',
+  './js/data/ocrchars.js',
+  './js/data/kb-objects.js',
+  './js/data/kb-objects2.js',
+  './js/data/kb-materials.js',
+  './js/data/kb-colours.js',
+  './js/data/kb-brands.js',
   // Bundled sample feed, so ?demo=1 also works with no network at all.
   './tools/sample-bus.jpg',
   './icons/icon.svg',
@@ -57,7 +74,15 @@ const RUNTIME_ASSETS = [
   './vendor/ort-wasm-simd-threaded.wasm'
 ];
 
-const MODEL_ASSETS = ['./models/yolov8n.onnx'];
+const MODEL_ASSETS = [
+  './models/yolov8n.onnx',          // detector (always on)
+  './models/imagenet-lite4.onnx',   // 1000-class classifier + embeddings
+  './models/ppocr-det.onnx',        // text detection
+  './models/ppocr-rec.onnx',        // text recognition
+  './models/ppocr-cls.onnx',        // text orientation
+  './models/yolov8n-pose.onnx',     // 17-keypoint body pose
+  './models/yolov8n-hand.onnx'      // 21-keypoint hands
+];
 
 /**
  * Is this payload safe to keep forever? Only the kinds that are served
