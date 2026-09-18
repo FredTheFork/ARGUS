@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en-GB" data-theme="arc">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no">
+<title>ARGUS — AR Vision Assistant</title>
+<meta name="description" content="ARGUS: an on-device augmented-reality vision assistant. YOLOv8 object recognition, spoken call-outs and target tracking — everything runs locally on your phone.">
+<meta name="theme-color" content="#02060c">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ARGUS">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<div id="stage">
+  <!-- ============ camera + AR overlay ============ -->
+  <video id="cam" playsinline autoplay muted></video>
+  <canvas id="hud"></canvas>
+  <div class="fx scanlines" aria-hidden="true"></div>
+  <div class="fx vignette" aria-hidden="true"></div>
+  <div id="shutter" aria-hidden="true"></div>
+
+  <!-- ============ telemetry (top) ============ -->
+  <div class="hud-block tlm" id="telemetry">
+    <div class="tlm-row"><span class="k">ARGUS</span><span class="v" id="version-pill">v1.0.0</span></div>
+    <div class="tlm-row"><span class="k">INF</span><span class="v" id="tlm-fps">-- FPS</span></div>
+    <div class="tlm-row"><span class="k">LAT</span><span class="v" id="tlm-lat">-- MS</span></div>
+    <div class="tlm-row"><span class="k">SCAN</span><span class="v" id="tlm-scan">—</span></div>
+    <div class="tlm-row"><span class="k">EP</span><span class="v" id="tlm-ep">IDLE</span></div>
+    <div class="tlm-row"><span class="k">NET</span><span class="v" id="tlm-model">YOLOV8N</span></div>
+  </div>
+
+  <!-- ============ status (top right) ============ -->
+  <div class="hud-block stat" id="statusbar">
+    <div class="tlm-row"><span class="k">TGT</span><span class="v" id="stat-obj">0</span></div>
+    <div class="tlm-row"><span class="k">CLS</span><span class="v" id="stat-cats">0</span></div>
+    <div class="tlm-row"><span class="k">LOCK</span><span class="v" id="stat-lock">NONE</span></div>
+    <div class="tlm-row"><span class="k">PWR</span><span class="v" id="stat-batt">—</span></div>
+  </div>
+
+  <!-- ============ target list (left) ============ -->
+  <ul class="hud-block tracklist" id="tracklist" aria-live="polite"></ul>
+
+  <!-- ============ subtitles ============ -->
+  <div id="subtitle" aria-live="polite"></div>
+  <div id="mic-interim"></div>
+
+  <!-- ============ toasts + filmstrip ============ -->
+  <div id="toasts" aria-live="polite"></div>
+  <div id="filmstrip"></div>
+
+  <!-- ============ control bar ============ -->
+  <nav id="controls">
+    <button class="ctl" data-act="camera" title="Switch optics" aria-label="Switch camera">
+      <svg viewBox="0 0 24 24"><path d="M4 9h3l1.5-2h7L17 9h3v11H4z"/><circle cx="12" cy="14" r="3.4"/></svg>
+      <span>OPTICS</span>
+    </button>
+    <button class="ctl hidden" data-act="torch" title="Illuminator" aria-label="Toggle torch">
+      <svg viewBox="0 0 24 24"><path d="M9 3h6l-1 7 3 3v8H7v-8l3-3z"/></svg>
+      <span>LIGHT</span>
+    </button>
+    <button class="ctl primary" data-act="lock" title="Acquire target" aria-label="Acquire target">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg>
+      <span>LOCK</span>
+    </button>
+    <button class="ctl" data-act="snap" title="Capture frame" aria-label="Capture frame">
+      <svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="13" rx="2"/><circle cx="12" cy="12.5" r="3.5"/></svg>
+      <span>SHOT</span>
+    </button>
+    <button class="ctl" data-act="voice" title="Mute assistant" aria-label="Toggle voice">
+      <svg viewBox="0 0 24 24"><path d="M4 9h3l5-4v14l-5-4H4z"/><path d="M16 9a4 4 0 010 6"/></svg>
+      <span>VOICE</span>
+    </button>
+    <button class="ctl" data-act="mic" title="Voice commands" aria-label="Toggle voice commands">
+      <svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="10" rx="3"/><path d="M6 11a6 6 0 0012 0M12 17v4"/></svg>
+      <span>MIC</span>
+    </button>
+    <button class="ctl" data-act="menu" title="Settings" aria-label="Open settings">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg>
+      <span>SETUP</span>
+    </button>
+  </nav>
+
+  <!-- ============ settings sheet ============ -->
+  <aside class="sheet" id="settings-sheet" aria-label="Settings">
+    <header>
+      <h2>ARGUS CONFIGURATION</h2>
+      <button class="ghost-btn" data-close="settings-sheet" aria-label="Close settings">✕</button>
+    </header>
+    <div class="sheet-body">
+
+      <section>
+        <h3>App</h3>
+        <div class="row-info">
+          <span>Install status</span>
+          <span id="install-state" class="status-chip">checking…</span>
+        </div>
+        <button class="ghost-btn wide" data-act="install" id="install-settings-btn">INSTALL ON THIS DEVICE</button>
+        <div class="out-note">Installed apps get their own icon, run full-screen and keep the 25 MB offline cache.</div>
+      </section>
+
+      <section>
+        <h3>Perception</h3>
+        <label class="row">
+          <span>Detection threshold</span>
+          <input type="range" min="0.2" max="0.85" step="0.01" data-setting="minConfidence" data-setting-out="minConfidence" data-format="pct">
+        </label>
+        <div class="out-note" data-setting-out="minConfidence" data-format="pct"></div>
+        <label class="row">
+          <span>Scan resolution</span>
+          <select data-setting="scanSize">
+            <option value="320">320 — fastest, longest range performance</option>
+            <option value="416">416 — balanced (recommended)</option>
+            <option value="512">512 — sharper, heavier</option>
+            <option value="640">640 — maximum fidelity</option>
+          </select>
+        </label>
+        <label class="row switch"><span>Adaptive resolution</span><input type="checkbox" data-setting="adaptive"></label>
+        <label class="row">
+          <span>Max simultaneous targets</span>
+          <select data-setting="maxDetections">
+            <option value="12">12</option><option value="24">24</option><option value="40">40</option><option value="60">60</option>
+          </select>
+        </label>
+        <label class="row switch"><span>Auto-acquire primary target</span><input type="checkbox" data-setting="autoLock"></label>
+        <label class="row">
+          <span>Compute backend</span>
+          <select data-setting="backend">
+            <option value="auto">Auto (WebGPU → WASM)</option>
+            <option value="webgpu">Force WebGPU</option>
+            <option value="wasm">Force WASM (CPU)</option>
+          </select>
+        </label>
+        <div class="hint">Backend changes apply after reloading the app.</div>
+      </section>
+
+      <section>
+        <h3>Overlay</h3>
+        <label class="row switch"><span>Heads-up display</span><input type="checkbox" data-setting="showHud"></label>
+        <label class="row switch"><span>Target brackets</span><input type="checkbox" data-setting="showBoxes"></label>
+        <label class="row switch"><span>Labels &amp; class names</span><input type="checkbox" data-setting="showLabels"></label>
+        <label class="row switch"><span>Confidence readouts</span><input type="checkbox" data-setting="showConfidence"></label>
+        <label class="row switch"><span>Proximity estimate</span><input type="checkbox" data-setting="showProximity"></label>
+        <label class="row switch"><span>Centre reticle</span><input type="checkbox" data-setting="showReticle"></label>
+        <label class="row switch"><span>Mirror front optic</span><input type="checkbox" data-setting="mirrorFront"></label>
+        <div class="themes">
+          <span>Palette</span>
+          <div class="theme-grid">
+            <button data-theme-opt="arc">ARC</button>
+            <button data-theme-opt="mark7">MARK VII</button>
+            <button data-theme-opt="ghost">GHOST</button>
+            <button data-theme-opt="matrix">GREEN</button>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <h3>Voice</h3>
+        <label class="row switch"><span>Spoken call-outs</span><input type="checkbox" data-setting="voiceEnabled"></label>
+        <label class="row">
+          <span>Synthesiser voice</span>
+          <select id="voice-list" data-setting="voiceURI"></select>
+        </label>
+        <label class="row">
+          <span>Cadence</span>
+          <select data-setting="cadence">
+            <option value="quiet">Quiet — high-interest only</option>
+            <option value="standard">Standard</option>
+            <option value="chatty">Chatty — narrate everything</option>
+          </select>
+        </label>
+        <label class="row">
+          <span>Address me as</span>
+          <input type="text" id="address-input" data-setting="address" maxlength="18" placeholder="sir">
+        </label>
+        <label class="row">
+          <span>Speech rate</span>
+          <input type="range" min="0.7" max="1.4" step="0.02" data-setting="voiceRate" data-setting-out="voiceRate">
+        </label>
+        <label class="row">
+          <span>Pitch</span>
+          <input type="range" min="0.5" max="1.4" step="0.02" data-setting="voicePitch" data-setting-out="voicePitch">
+        </label>
+        <label class="row switch"><span>Subtitles</span><input type="checkbox" data-setting="subtitles"></label>
+        <label class="row switch"><span>Haptic feedback</span><input type="checkbox" data-setting="haptics"></label>
+        <div class="btn-row">
+          <button class="ghost-btn" data-action="test-voice">TEST VOICE</button>
+          <button class="ghost-btn" data-action="greet">GREETING</button>
+        </div>
+      </section>
+
+      <section>
+        <h3>System</h3>
+        <dl id="model-info" class="kv"></dl>
+        <div class="btn-row">
+          <button class="ghost-btn" data-action="reset">RESTORE DEFAULTS</button>
+          <button class="ghost-btn" data-act="help">FIELD MANUAL</button>
+        </div>
+        <div class="hint">
+          All processing happens on this device. The camera stream never leaves the handset and the app makes no network requests after installation.
+        </div>
+      </section>
+    </div>
+  </aside>
+
+  <!-- ============ console sheet ============ -->
+  <aside class="sheet" id="console-sheet" aria-label="System console">
+    <header>
+      <h2>SYSTEM CONSOLE</h2>
+      <button class="ghost-btn" data-close="console-sheet" aria-label="Close console">✕</button>
+    </header>
+    <div class="sheet-body">
+      <div id="console-log"></div>
+      <div class="btn-row">
+        <button class="ghost-btn" data-act="status">SITREP</button>
+        <button class="ghost-btn" data-act="standby">STANDBY / WAKE</button>
+        <button class="ghost-btn" data-act="scan">SPECTRAL SWEEP</button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ boot overlay ============ -->
+  <div class="overlay" id="boot">
+    <div class="boot-inner">
+      <div class="ring-wrap">
+        <svg viewBox="0 0 100 100" width="132" height="132" aria-hidden="true">
+          <circle class="ring-bg" cx="50" cy="50" r="42"></circle>
+          <circle id="boot-ring-fg" class="ring-fg" cx="50" cy="50" r="42"></circle>
+          <circle class="ring-inner" cx="50" cy="50" r="30"></circle>
+        </svg>
+        <div class="ring-label"><b id="boot-pct">0%</b><span>NEURAL CORE</span></div>
+      </div>
+
+      <h1 class="wordmark">ARGUS</h1>
+      <p class="tagline">Adaptive Recognition &amp; Guidance Utility System</p>
+      <p class="subtag">on-device vision · offline · nothing leaves the handset</p>
+
+      <div id="boot-lines" aria-live="polite"></div>
+      <div id="boot-detail" class="boot-detail"></div>
+      <div id="boot-error" class="boot-error"></div>
+      <button id="demo-fallback" class="ghost-btn hidden">RUN WITH SAMPLE FEED INSTEAD</button>
+      <button id="boot-retry" class="ghost-btn hidden">RETRY NEURAL CORE</button>
+
+      <button id="engage" disabled>
+        <span class="pulse"></span>
+        <span id="engage-label">ENGAGE OPTICS</span>
+      </button>
+
+      <button id="install-btn" class="ghost-btn hidden" data-act="install">
+        <span id="install-btn-label">INSTALL TO PHONE</span>
+      </button>
+      <p id="install-chip" class="install-chip hidden">RUNNING AS AN INSTALLED APP</p>
+
+      <ul class="brief">
+        <li><b>80</b> object classes · YOLOv8-nano neural core</li>
+        <li>Spoken call-outs, target locking, capture log</li>
+        <li>100% offline — no frames ever leave this device</li>
+      </ul>
+      <div class="boot-foot">
+        <span id="boot-ver">v1.0.0</span>
+        <button class="linklike" data-act="help">Field manual</button>
+        <button class="linklike" data-act="console">Console</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ help / field manual ============ -->
+  <div class="overlay modal" id="help-modal" data-dismiss="1">
+    <div class="modal-inner">
+      <header>
+        <h2>FIELD MANUAL</h2>
+        <button class="ghost-btn" data-close="help-modal" aria-label="Close manual">✕</button>
+      </header>
+      <div class="modal-body">
+        <h3 id="install-heading">Install as an app</h3>
+        <p id="install-note"></p>
+        <ol id="install-steps" class="install-steps"></ol>
+        <p id="install-after" class="install-after"></p>
+        <p class="install-meta" id="install-meta"></p>
+        <h3>Operating the optics</h3>
+        <ul>
+          <li><b>Tap a bracket</b> — lock onto that object. Tap again to release.</li>
+          <li><b>Double tap a bracket</b> — spoken readout of class, confidence and proximity.</li>
+          <li><b>Hold anywhere</b> — full situation report, spoken aloud.</li>
+          <li><b>Tap empty space</b> — wide rescan sweep.</li>
+          <li><b>Swipe up from the bottom</b> — open configuration.</li>
+        </ul>
+        <h3>Voice commands <span class="tag">enable MIC</span></h3>
+        <ul>
+          <li>“status” / “what do you see” — situation report</li>
+          <li>“lock onto the dog” — acquire a named class</li>
+          <li>“stop tracking” — release the lock</li>
+          <li>“snapshot” — store a captured frame</li>
+          <li>“torch” — toggle the illuminator (if fitted)</li>
+          <li>“flip camera” — switch optics</li>
+          <li>“mute” / “talk to me” — audio control</li>
+          <li>“stand down” / “wake” — halt and resume inference</li>
+          <li>“full scan”, “help”, “palette green”</li>
+        </ul>
+        <h3>How it works</h3>
+        <p>Each frame from the camera is letterboxed to an aspect-correct tensor and pushed through a YOLOv8-nano convolutional network via onnxruntime-web — WebGPU where the handset supports it, otherwise multi-threaded WebAssembly. The anchor-free head emits 84 × N values per frame (4 box coordinates plus 80 class scores), which ARGUS decodes, filters with class-wise non-maximum suppression, then matches against the previous frame with an intersection-over-union tracker. Stable identities are what make the brackets stop flickering and let the assistant talk about “that object” over time.</p>
+        <h3>Proximity estimates</h3>
+        <p>This model has no depth output. The NEAR / MID / FAR chips are derived from how much of the frame an object occupies — a monocular size proxy, not a metric distance.</p>
+        <h3>Performance notes</h3>
+        <ul>
+          <li><b>INF</b> in the telemetry block is the neural inference rate — the number of full scene analyses per second. The overlay itself redraws every display frame, so the brackets stay smooth even when the analysis rate is low.</li>
+          <li>Warm the app for 10–15 seconds: the first frames are slower while the graph compiles and the GPU pipeline ramps.</li>
+          <li>WebGPU gives the smoothest overlay. If the HUD stutters, force the WASM backend in configuration.</li>
+          <li>Bright, high-contrast scenes detect best; the network was trained on COCO photographs.</li>
+          <li>Long sessions get warm. Standby halts inference instantly.</li>
+        </ul>
+        <h3>Privacy</h3>
+        <p>The neural core, the runtime and every asset are stored locally and served by the app's own service worker. There is no analytics, no upload path and no third-party script: the only network request is the initial installation of the files.</p>
+        <h3>Attribution</h3>
+        <p>YOLOv8 architecture by Ultralytics (AGPL-3.0); weights exported to ONNX opset 12. Runtime: onnxruntime-web 1.20.1 (MIT). Interface, tracker, narration engine and shells written for this build.</p>
+        <p class="kv-foot">Build <span id="build-id">ARGUS-1.0.0</span> · service worker <span id="sw-status"></span></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ photo viewer ============ -->
+  <div class="overlay modal" id="photo-modal" data-dismiss="1">
+    <div class="modal-inner wide">
+      <header>
+        <h2>CAPTURE LOG</h2>
+        <button class="ghost-btn" data-close="photo-modal" aria-label="Close capture">✕</button>
+      </header>
+      <div class="modal-body">
+        <img id="photo-img" alt="Captured ARGUS frame">
+        <div class="btn-row">
+          <a id="photo-dl" class="ghost-btn" download>SAVE PNG</a>
+          <button class="ghost-btn" data-close="photo-modal">CLOSE</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
