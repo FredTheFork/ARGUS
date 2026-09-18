@@ -25,3 +25,9 @@
     X-Content-Type-Options = "nosniff"
     Referrer-Policy = "no-referrer"
     Permissions-Policy = "camera=(self), microphone=(self), geolocation=()"
+    # Cross-origin isolation: without these two, SharedArrayBuffer is disabled
+    # and onnxruntime silently falls back to a single thread. Every asset is
+    # same-origin, so require-corp costs nothing.
+    Cross-Origin-Opener-Policy = "same-origin"
+    Cross-Origin-Embedder-Policy = "require-corp"
+    Cross-Origin-Resource-Policy = "same-origin"

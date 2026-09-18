@@ -12,6 +12,7 @@ console.log('ARGUS test suite\n');
 await import('./logic.mjs');
 await import('./assets.mjs');
 await import('./boot.mjs');
+await import('./pwa.mjs');
 
 const { pass, fail, failures } = results;
 console.log(`\n${pass} passed, ${fail} failed`);

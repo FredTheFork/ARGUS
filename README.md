@@ -93,7 +93,7 @@ entirely with one button.
 
 ```bash
 node tools/serve.mjs          # http://localhost:8080
-npm test                      # 195 headless checks, no browser required
+npm test                      # 243 headless checks, no browser required
 npm run verify:models         # run the real models over a real photograph
 ```
 
@@ -122,27 +122,40 @@ the following were caught — none of them are visible to a unit test:
 
 The dev server sends `Cross-Origin-Opener-Policy` and
 `Cross-Origin-Embedder-Policy` so the page is cross-origin isolated, which is
-what lets onnxruntime-web use SharedArrayBuffer and multiple threads. Without
-those headers inference still works, single-threaded.
+what lets onnxruntime-web use SharedArrayBuffer and multiple threads.
+`netlify.toml` and `vercel.json` ship the same headers for production; hosts
+that cannot set response headers (GitHub Pages) simply fall back to
+single-threaded inference, which still works.
 
-`npm test` runs three suites: **logic** (knowledge base, colour and material
+`npm test` runs four suites: **logic** (knowledge base, colour and material
 analysis, tracker, memory, language, fusion relations), **assets** (every import
 resolves to a real export, every shipped file exists, model digests match
-`models/manifest.json`) and **boot** (the real `app.js` start-up under a DOM that
-refuses the camera and blocks the runtime, proving the failure is reported
-instead of thrown).
+`models/manifest.json`, version strings stay in sync), **boot** (the real
+`app.js` start-up under a DOM that refuses the camera and blocks the runtime —
+proving failures are reported instead of thrown, and that a successful boot
+really does dismiss the loading screen) and **pwa** (the service worker
+evaluated against a fake Cache API over the real repository files — precache,
+verified payloads, cache-first vs stale-while-revalidate, range requests,
+offline navigation, background model fill and purge — plus the inline boot
+watchdog in `index.html`).
 
 At runtime the same manifest is checked in the other direction: each model is
 hashed as it loads and compared with `models/manifest.json`, so "the fetch
 returned 200" becomes "these are the bytes that were tested".
 
 Then open the address on the phone, allow the camera, and *Add to Home Screen*
-(Safari) or *Install app* (Chrome). The service worker caches the whole app and
-all seven models (~47 MB) on first run, after which it works fully offline.
+(Safari) or *Install app* (Chrome). On first launch the service worker caches
+the application shell while the loader fetches the models; once the first boot
+succeeds it fills the remaining payloads in the background, so every later
+launch is fully offline. Camera and models start **in parallel**, the camera
+step gives up politely (25 s watchdog) if a webview hides the permission
+prompt, and a classic-script watchdog in `index.html` reports a broken module
+graph with a working Retry even when the app scripts never load at all.
 
 No camera? ARGUS falls back to a **demo feed**: the bundled still frame is pushed
 through the exact same pipeline, so the whole interface can be exercised
-anywhere.
+anywhere — there is a *Run demo feed* button on every boot error, or open the
+app with `?demo=1` to skip the camera outright.
 
 ---
 

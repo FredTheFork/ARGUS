@@ -39,6 +39,12 @@ html, body {
 
 body { overflow: hidden; }
 
+/* The hidden attribute must always win. Fixed overlays here (the boot screen,
+   the stage, sheets) set `display` explicitly, which otherwise beats the UA
+   `[hidden] { display: none }` rule — leaving a dismissed overlay visible, or
+   worse, invisible-but-present and swallowing every touch on mobile. */
+[hidden] { display: none !important; }
+
 button, input, select { font: inherit; color: inherit; }
 
 .hint { color: color-mix(in srgb, var(--ink) 62%, transparent); font-size: 12px; line-height: 1.5; margin: 6px 0 14px; }

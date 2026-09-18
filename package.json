@@ -1,6 +1,6 @@
 {
   "name": "argus",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "private": true,
   "description": "ARGUS \u2014 an on-device visual agent: detection, 1000-class recognition, text and brand reading, colour and material analysis, pose, memory and spoken answers, behind a heads-up display.",
   "type": "module",
