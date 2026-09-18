@@ -167,4 +167,70 @@ const before = elements.get('toasts').children.length;
 await app.state.hud.toast('test toast', 'info');
 test('toast renders', elements.get('toasts').children.length > before);
 
+/* ── boot recovery wiring ─────────────────────────────────────────────── */
+section('boot recovery wiring');
+const retryBtn = elements.get('boot-retry');
+test('retry button is wired by app.js (plus the inline watchdog)', (retryBtn._listeners.click || []).length >= 1,
+  `${(retryBtn._listeners.click || []).length} click handlers`);
+
+/* ── the loading screen actually comes down ───────────────────────────── */
+section('stage reveal (regression: boot must not stick at ONLINE)');
+// Simulate both halves of the parallel boot winning, then open the stage the
+// way the real boot does. Before the fix, nothing ever called hideBoot() and
+// the app sat under the loading card forever — the "stuck on mobile" report.
+app.state.cameraStatus = { ok: true };
+app.state.modelStatus = { ok: true };
+const entered = app.maybeEnterStage();
+test('maybeEnterStage opens the stage once both halves are ready', entered === true);
+test('a second attempt does not re-enter', app.maybeEnterStage() === false);
+await new Promise((r) => setTimeout(r, 460));   // hideBoot fades over 380 ms
+test('boot overlay is dismissed', elements.get('boot').hidden === true);
+test('stage is revealed', elements.get('stage').hidden === false);
+test('no unhandled rejections after stage reveal', errors.length === 0, errors.map((e) => e?.message).join('; '));
+
+/* ── the HUD survives a real frame state ──────────────────────────────── */
+section('HUD frame render (regression: reticle ReferenceError)');
+// Default settings turn the reticle on, and the first frame used to throw
+// `t is not defined` on every render — killing the HUD rAF chain outright.
+let renderError = null;
+try {
+  app.state.hud.render({
+    frame: { width: 640, height: 480 },
+    records: [],
+    texts: [],
+    scene: null,
+    lighting: null,
+    timing: { detect: 12 },
+    scanSize: 416,
+    backend: 'WASM SIMD',
+    fps: 30,
+    battery: '100%',
+    modules: {},
+    memorySummary: { taught: 0, known: 0 },
+    lockedId: null,
+    paused: false,
+    facing: 'environment',
+    tickerLine: 'test',
+    find: null,
+    lastSpoken: ''
+  });
+} catch (err) {
+  renderError = err;
+}
+test('HUD renders a live frame without throwing', !renderError, renderError ? renderError.message : 'reticle, brackets, telemetry, DOM sync');
+await new Promise((r) => setTimeout(r, 120));
+test('HUD rAF loop survives repeated frames', errors.length === 0, errors.map((e) => e?.message).join('; '));
+
+/* ── demo entry recovers from the failure state ───────────────────────── */
+section('demo feed entry');
+app.state.bootFailed = false;
+app.state.bootFailKind = null;
+await app.startDemo();
+// Models can never load in this harness (the runtime script errors on
+// purpose): the honest outcome is a model error back on the boot screen —
+// never a thrown rejection, and the demo button stays on offer.
+test('demo entry with dead models reports instead of throwing', app.state.cameraStatus?.ok === true);
+test('model failure is re-reported for the demo', elements.get('boot-error').hidden === false);
+test('no unhandled rejections after demo attempt', errors.length === 0, errors.map((e) => e?.message).join('; '));
+
 export default true;

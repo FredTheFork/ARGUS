@@ -1,12 +1,21 @@
 /**
  * sw.js — ARGUS offline shell.
  *
- * Pre-caches the whole application — HTML, CSS, ES modules, the
- * onnxruntime-web runtime, both WASM binaries and the model suite (detector,
- * 1000-class classifier, PP-OCRv4 text pipeline, pose and hands, ~47 MB) so
- * the assistant works with no network at all after the first visit. Range
- * requests are answered from cache because some WebKit builds stream large
- * binaries that way.
+ * Install pre-caches the application shell — HTML, CSS, ES modules, icons (~2
+ * MB), so the install step is measured in seconds even on a bad connection.
+ * The heavy immutable payloads (the onnxruntime-web pair and the model suite,
+ * ~47 MB) arrive two ways, whichever happens first:
+ *
+ *   · lazily — the loader's own requests pass through the fetch handler below
+ *     and are cached after verification, so a controlled page warms the cache
+ *     at zero extra cost; and
+ *   · on demand — after a successful boot the page sends 'argus-ensure-offline'
+ *     and this worker fills any gaps in the background, one file at a time.
+ *
+ * The result is the guarantee the app advertises — after the first successful
+ * launch, ARGUS works with no network at all — without ever duplicating 47 MB
+ * of downloads on first run. Range requests are answered from cache because
+ * some WebKit builds stream large binaries that way.
  *
  * Two rules stop this cache from ever pinning the app to a broken boot:
  *
@@ -20,7 +29,7 @@
  *      (message type 'argus-purge') once the runtime has proved it unusable.
  */
 
-const VERSION = 'argus-2.0.1';   // bump to force a full re-cache on the next launch
+const VERSION = 'argus-2.0.2';   // bump to force a full re-cache on the next launch
 const CORE = `${VERSION}-core`;
 const RUNTIME = `${VERSION}-runtime`;
 const MODELS = `${VERSION}-models`;
@@ -97,11 +106,15 @@ function looksRight(pathname, bytes) {
   }
   if (/\.onnx$/.test(pathname)) {
     // ONNX is protobuf: field 1 (ir_version) is a varint, so a real model starts
-    // 0x08. An error page starts '<'.
-    return bytes.length >= 1024 * 1024 && bytes[0] === 0x08;
+    // 0x08. An error page starts '<'. The smallest shipped model (the OCR
+    // orientation head) is ~570 KB, so the floor sits well under it.
+    return bytes.length >= 256 * 1024 && bytes[0] === 0x08;
   }
   if (/\.mjs$/.test(pathname) || /\.js$/.test(pathname)) {
-    const head = new TextDecoder().decode(bytes.subarray(0, 400));
+    // Judge enough of the file for its doc-comment header to end: several
+    // modules open with ~600 characters of block comment before the first
+    // import, and 400 bytes was once not enough to see any code at all.
+    const head = new TextDecoder().decode(bytes.subarray(0, 4096));
     return !/^\s*</.test(head) && /function|=>|import|export|const|var|let/.test(head);
   }
   return true;
@@ -154,13 +167,54 @@ async function precacheVerified(cacheName, urls, { reload = true } = {}) {
 
 self.addEventListener('install', (event) => {
   event.waitUntil((async () => {
+    // Only the shell is pre-cached at install time: it keeps the install step
+    // fast on first visit (when the page itself is also downloading models)
+    // and the immutable payloads are filled lazily / on demand instead.
     // Best-effort: never let one missing or unverifiable asset block the install.
     await precacheVerified(CORE, CORE_ASSETS);
-    await precacheVerified(RUNTIME, RUNTIME_ASSETS);
-    await precacheVerified(MODELS, MODEL_ASSETS, { reload: false });
     await self.skipWaiting();
   })());
 });
+
+/**
+ * Fill any gaps in the immutable caches, one file at a time, after the page
+ * reports a successful boot. Sequential on purpose: this is background work
+ * and must not compete with the live camera pipeline for the radio.
+ * Re-entrant: a second request joins the first rather than re-downloading.
+ */
+let ensureRunning = null;
+async function ensureOffline() {
+  if (ensureRunning) return ensureRunning;
+  ensureRunning = (async () => {
+    const plan = [[RUNTIME, RUNTIME_ASSETS], [MODELS, MODEL_ASSETS]];
+    const wanted = plan.reduce((n, [, urls]) => n + urls.length, 0);
+    const missing = [];
+    for (const [name, urls] of plan) {
+      const cache = await caches.open(name);
+      for (const url of urls) {
+        if (!(await cache.match(url, { ignoreSearch: true }))) missing.push([name, url]);
+      }
+    }
+    let filled = 0;
+    for (const [name, url] of missing) {
+      try {
+        const response = await fetch(url);
+        const pathname = new URL(url, self.location.href).pathname;
+        if (!response || response.status !== 200) continue;
+        const { bytes, ok } = await readPayload(pathname, response);
+        if (!ok) { console.warn('[argus-sw] ensure-offline refused an unverified payload:', pathname); continue; }
+        const cache = await caches.open(name);
+        await cache.put(new Request(url), asResponse(bytes, response));
+        filled++;
+      } catch { /* offline, or the radio dropped — the next launch re-asks */ }
+    }
+    const clients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+    const summary = { type: 'argus-offline-ready', total: wanted, missing: missing.length, filled };
+    for (const client of clients) client.postMessage(summary);
+    return summary;
+  })().finally(() => { ensureRunning = null; });
+  return ensureRunning;
+}
 
 self.addEventListener('activate', (event) => {
   event.waitUntil((async () => {
@@ -215,13 +269,17 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
 
-  // Navigations: serve the cached shell so launches are instant and offline.
+  // Navigations: network-first with the cached shell as the offline fallback.
   if (request.mode === 'navigate') {
     event.respondWith((async () => {
       try {
         const fresh = await fetch(request);
-        const cache = await caches.open(CORE);
-        cache.put('./index.html', fresh.clone());
+        // Only a genuine, own-origin page earns a place in the shell cache — a
+        // captive portal or an error page must not replace the last good copy.
+        if (fresh.ok && fresh.type === 'basic') {
+          const cache = await caches.open(CORE);
+          cache.put('./index.html', fresh.clone());
+        }
         return fresh;
       } catch {
         const cache = await caches.open(CORE);
@@ -298,6 +356,13 @@ self.addEventListener('fetch', (event) => {
 self.addEventListener('message', (event) => {
   const data = event.data;
   if (data === 'skip-waiting') { self.skipWaiting(); return; }
+
+  // The page asks once it has confirmed a working online boot: make sure the
+  // offline copy is complete in the background, then report what is held.
+  if (data && data.type === 'argus-ensure-offline') {
+    event.waitUntil(ensureOffline());
+    return;
+  }
 
   // The page only asks for this after it has proved a cached asset is unusable
   // (failed length/magic checks, or the runtime refused to build a session from

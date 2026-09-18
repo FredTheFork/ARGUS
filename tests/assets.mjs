@@ -151,6 +151,35 @@ const dynamic = new Set(['install-btn']);
 const missingIds = [...referenced].filter((id) => !htmlIds.has(id) && !dynamic.has(id));
 test(`app/ui element ids (${referenced.size})`, missingIds.length === 0, missingIds.join(', '));
 
+section('mobile boot contract');
+// Regression guards for the "stuck on the loading screen on mobile" report:
+// three separate defects combined to leave the boot card up forever.
+const css = readFileSync(join(ROOT, 'css/app.css'), 'utf8');
+test('css honours the hidden attribute over explicit display rules',
+  /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/.test(css),
+  'without it, .boot{display:grid} beats the UA [hidden] rule and the overlay never goes away');
+const appJsSrc = readFileSync(join(ROOT, 'js/app.js'), 'utf8');
+const enterStageBody = (appJsSrc.match(/function enterStage\(\) \{([\s\S]*?)\n\}/) || [])[1] || '';
+test('the boot card is dismissed on the success path',
+  enterStageBody.includes('hideBoot()') && enterStageBody.includes('startLoop()'),
+  'enterStage() must both dismiss the boot card and start the loop');
+test('index.html carries the non-module boot watchdog',
+  html.includes('__argusPhase') && /<noscript>/.test(html),
+  'the watchdog reports a dead module graph; noscript covers JS-off');
+test('retry button exists in markup', htmlIds.has('boot-retry'));
+
+section('version sync');
+// A drift between these is how a new build ships code with an old cache: the
+// worker version namespaces every cache, so they must move together.
+const cfgSrc = readFileSync(join(ROOT, 'js/config.js'), 'utf8');
+const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+const appVersion = (cfgSrc.match(/VERSION = '([^']+)'/) || [])[1];
+const swVersion = (sw.match(/VERSION = 'argus-([^']+)'/) || [])[1];
+const htmlVersion = (html.match(/id="boot-ver">([^<]+)</) || [])[1];
+test('config, package.json, service worker and boot card share one version',
+  !!appVersion && appVersion === pkg.version && appVersion === swVersion && appVersion === htmlVersion,
+  `config=${appVersion} pkg=${pkg.version} sw=${swVersion} html=${htmlVersion}`);
+
 section('data');
 const kb = namespaces.get('js/kb.js');
 const cfg = namespaces.get('js/config.js');

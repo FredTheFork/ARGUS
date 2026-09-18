@@ -77,7 +77,16 @@ export class Hud {
 
   _loop(t) {
     this._sweep = t;
-    if (this.lastFrame) this.render(this.lastFrame);
+    // One bad frame must not stop the HUD: without this guard a single
+    // exception here ends the requestAnimationFrame chain for good.
+    try {
+      if (this.lastFrame) this.render(this.lastFrame);
+    } catch (err) {
+      if (!this._loopWarned) {
+        this._loopWarned = true;
+        console.warn('[argus-hud] frame render failed:', err && err.message);
+      }
+    }
     requestAnimationFrame((tt) => this._loop(tt));
   }
 
@@ -96,7 +105,7 @@ export class Hud {
     const px = (x) => (mirror ? this.width - (x * map.scale + map.offsetX) : x * map.scale + map.offsetX);
     const py = (y) => y * map.scale + map.offsetY;
 
-    if (s.showReticle) this._reticle(ctx, state, t);
+    if (s.showReticle) this._reticle(ctx, state, this._sweep);
     if (state.paused) this._pausedBadge(ctx);
 
     const records = (state.records || []).filter((r) => r.box && !r.synthetic);
@@ -641,6 +650,9 @@ export class Hud {
   }
 
   setBootStage(text, pct) {
+    // The standalone watchdog in index.html keys off this flag: a stage that
+    // stops changing for a long time is a wedged load, not a slow one.
+    try { window.__argusPhase = text; } catch { /* outside a real window */ }
     const stage = $('boot-stage');
     if (stage) stage.textContent = text;
     const bar = $('boot-pct');
@@ -651,10 +663,12 @@ export class Hud {
 
   bootReady(detail = '') {
     this.setBootStage('ONLINE', 1);
+    try { window.__argusReady = true; } catch { /* outside a real window */ }
     if (detail) this.bootLine(detail, 'ok');
   }
 
   bootError(headline, detail = '') {
+    try { window.__argusFailed = true; } catch { /* outside a real window */ }
     const box = $('boot-error');
     if (!box) return;
     box.hidden = false;
@@ -666,11 +680,13 @@ export class Hud {
   }
 
   hideBootError() {
+    try { window.__argusFailed = false; } catch { /* outside a real window */ }
     const box = $('boot-error');
     if (box) box.hidden = true;
   }
 
   hideBoot() {
+    try { window.__argusReady = true; } catch { /* outside a real window */ }
     const boot = $('boot');
     if (boot) {
       boot.style.transition = 'opacity .35s ease';
