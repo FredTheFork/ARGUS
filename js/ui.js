@@ -30,18 +30,49 @@ export class Hud {
     this.dpr = Math.min(2, window.devicePixelRatio || 1);
     this.lastFrame = null;
     this._toasts = [];
+    // The canvas has no measured box yet. Zero is the honest starting point:
+    // the HUD is built while #stage is hidden, so that is what boot sees.
+    this.width = 0;
+    this.height = 0;
     this.resize();
     window.addEventListener('resize', () => this.resize());
     window.addEventListener('orientationchange', () => setTimeout(() => this.resize(), 250));
+    // A window resize is not the only way this canvas changes size, and it is
+    // not the way it first gains a size: an element going from hidden to
+    // visible fires no window event at all. Observing the box covers that
+    // reveal, split-screen, late layout and everything after boot.
+    if (typeof ResizeObserver === 'function') {
+      this._ro = new ResizeObserver(() => this.resize());
+      this._ro.observe(this.canvas);
+      if (this.canvas.parentElement) this._ro.observe(this.canvas.parentElement);
+    }
     requestAnimationFrame((t) => this._loop(t));
   }
 
+  /**
+   * Match the backing store to the canvas's CSS box.
+   *
+   * Returns true once the canvas has a real box to draw on, false while it has
+   * none. A zero box is never written to the canvas: assigning 0 reallocates
+   * the backing store to nothing and every tag drawn into it is discarded
+   * without a single error — the overlay silently disappears while the app
+   * looks perfectly healthy. So an unmeasurable canvas leaves the last good
+   * size (and the last good frame) alone until the box arrives.
+   */
   resize() {
     const { clientWidth: w, clientHeight: h } = this.canvas;
-    this.canvas.width = Math.round(w * this.dpr);
-    this.canvas.height = Math.round(h * this.dpr);
+    if (!(w > 0) || !(h > 0)) return false;
+    const bw = Math.round(w * this.dpr);
+    const bh = Math.round(h * this.dpr);
+    // Assigning either dimension reallocates and clears, so only touch them
+    // when the size has genuinely moved.
+    if (bw !== this.canvas.width || bh !== this.canvas.height) {
+      this.canvas.width = bw;
+      this.canvas.height = bh;
+    }
     this.width = w;
     this.height = h;
+    return true;
   }
 
   /** Map frame pixels → display pixels with the same cover maths the video uses. */
@@ -60,6 +91,11 @@ export class Hud {
     // One bad frame must not stop the HUD: without this guard a single
     // exception here ends the requestAnimationFrame chain for good.
     try {
+      // Still no box (the stage is hidden or has not been laid out): keep
+      // asking. This is the net that catches a canvas which was 0×0 at boot
+      // and is never re-measured again — otherwise the overlay draws into
+      // nothing for the life of the page.
+      if (!this.width || !this.height) this.resize();
       if (this.lastFrame) this.render(this.lastFrame);
     } catch (err) {
       if (!this._loopWarned) {
@@ -72,6 +108,10 @@ export class Hud {
 
   render(state) {
     this.lastFrame = state;
+    // No box, no drawing: every call below would be swallowed by a 0×0
+    // backing store. The frame is kept, so the first real size renders the
+    // current state rather than waiting for the next inference pass.
+    if (!this.width || !this.height) return;
     const ctx = this.ctx;
     const s = this.getSettings();
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
@@ -294,5 +334,10 @@ export class Hud {
     }
     const stage = $('stage');
     if (stage) stage.hidden = false;
+    // The stage just became visible, so this is the first moment the overlay
+    // has a box to measure. No window resize fires for a reveal, and until
+    // this ran the HUD was sitting on a 0×0 canvas drawing tags into nothing:
+    // measure now, synchronously, with the layout the browser has just done.
+    this.resize();
   }
 }
