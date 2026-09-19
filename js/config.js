@@ -8,8 +8,8 @@
  * models can name.
  */
 
-export const VERSION = '3.0.2';
-export const BUILD = 'ARGUS-3.0.2/instant-recognition';
+export const VERSION = '3.1.0';
+export const BUILD = 'ARGUS-3.1.0/instant-recognition';
 
 /* ------------------------------------------------------------------ *\
  * Category taxonomy
@@ -113,36 +113,59 @@ export const COCO_META = {
  * The detector alone is a complete app — everything else sharpens the names
  * as it loads and runs in the background, so the first tag always lands as
  * fast as the detector can say so.
+ *
+ * The numbers below are set from measured per-stage costs (see
+ * tools/bench-perf.mjs). The governing principle: the full-frame detector
+ * must sustain roughly a dozen passes a second on a mid-range phone, and
+ * nothing else may take inference time away from it while an object is still
+ * unnamed. Cheap work is free; expensive work is cadenced, budget-gated, and
+ * never blocks a frame.
  * ------------------------------------------------------------------ */
 
 export const CONFIG = {
   // frame loop
   minConfidence: 0.34,       // detector score floor
-  scanSize: 416,             // detector input size (multiple of 32)
-  scanFloor: 320,
-  maxDetections: 32,
+  scanSize: 320,             // detector input size at boot (multiple of 32)
+  scanFloor: 256,            // governor never goes below this
+  scanCeiling: 416,          // governor never goes above this
+  scanBudgetMs: 70,          // full-frame budget: shrink above ~1.5×, grow below ~0.7×
+  maxDetections: 24,
   backend: 'auto',           // auto | webgpu | wasm
   mirrorFront: true,
+  inferGapMs: 40,            // minimum spacing between inference passes
+  grabWidth: 640,            // processing width of a camera frame
 
-  // detail: 'auto' runs 2×2 overlapping tiles on top of the full frame while
-  // the full frame stays fast enough to spare — small objects survive.
+  // detail: 'auto' interleaves one 2×2 tile per frame — a full sweep over four
+  // frames — while the full frame stays fast enough to spare it. Small objects
+  // still survive; the sweep costs a fraction of what an every-frame 5-pass
+  // pipeline cost.
   detailMode: 'auto',
-  tileBudgetMs: 90,
+  tileSize: 288,
+  tileBudgetMs: 55,          // full-frame mean must beat this for tiles to run
+  tileGapMs: 450,            // minimum spacing between tile passes
 
-  // classifier (1000-class refinement, in frame, budgeted)
-  classifyEvery: 500,
+  // classifier (1000-class refinement — background, budgeted, new tracks first)
+  classifyEvery: 2000,
   classifyTopK: 5,
-  classifyBudget: 2,
+  classifyBudget: 1,         // crops per frame slot; also the queue's parallelism
   classifyMinArea: 0.002,
 
-  // OCR (background)
-  ocrEvery: 1600,
+  // OCR (background, naming-critical so it runs on every device — but capped:
+  // detection input is clipped to ocrMaxSide on the long edge, which alone is
+  // ~3× cheaper than the old upscale-to-736 path)
+  ocrEvery: 2400,
+  ocrSettleMs: 1200,         // let the first tags land before the first OCR pass
+  ocrMaxSide: 512,
   ocrMinConfidence: 0.55,
-  ocrMaxLines: 16,
+  ocrMaxLines: 8,
+  ocrStillSkip: 5.5,         // luma-diff threshold: a still scene is not re-read
 
-  // pose + hands (background, people only)
-  poseEvery: 550,
-  handEvery: 700,
+  // pose + hands (background, people only, fast devices only — the fixed
+  // 640 px pose graph costs ~0.6-2.4 s of CPU per pass, which no phone should
+  // pay for a cosmetic posture word)
+  poseEvery: 4000,
+  handEvery: 3000,
+  bgFrameBudgetMs: 45,       // pose/hands/tiles only while mean frame is under this
 
   // tracker
   trackMaxAge: 1400,

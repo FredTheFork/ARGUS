@@ -1,6 +1,6 @@
 {
   "name": "argus",
-  "version": "3.0.2",
+  "version": "3.1.0",
   "private": true,
   "description": "ARGUS — instant on-device object recognition: point the camera and objects are outlined and named on the feed. The full model suite (detection, 1000-class classification, OCR, pose) runs locally; nothing leaves the device.",
   "type": "module",

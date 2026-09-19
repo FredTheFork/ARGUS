@@ -20,6 +20,13 @@ export const VENDOR = 'vendor/';
  * Runtime
  * ------------------------------------------------------------------ */
 
+// Every tier boots with ORT's proxy worker by default: all graph execution —
+// CPU and GPU alike — then happens in a worker, and a 200 ms OCR pass or a
+// 640 px pose run blocks a worker thread instead of the video feed and the
+// overlay. Attempt 1 of each tier uses the proxy; if anything in the chain
+// fails (worker spawn blocked, WebGPU absent inside the worker, a wedged
+// import), the tier's attempt 2 falls back to in-thread inference rather
+// than losing the runtime altogether.
 const TIERS = [
   {
     id: 'webgpu',
@@ -27,6 +34,7 @@ const TIERS = [
     base: 'ort-wasm-simd-threaded.jsep',
     providers: ['webgpu', 'wasm'],
     label: 'WebGPU',
+    proxy: true,
     needsAdapter: true
   },
   {
@@ -35,6 +43,7 @@ const TIERS = [
     base: 'ort-wasm-simd-threaded',
     providers: ['wasm'],
     label: 'WASM SIMD',
+    proxy: true,
     needsAdapter: false
   }
 ];
@@ -88,11 +97,15 @@ export class Runtime {
           await new Promise((r) => setTimeout(r, 400 * attempt));
         }
         try {
-          await this._startTier(tier, bust, onStage);
+          // Attempt 2 of a tier drops the proxy worker — the fallback path
+          // when worker creation or its first run fails in this webview.
+          const useProxy = attempt === 1 && tier.proxy === true;
+          await this._startTier(tier, bust, onStage, useProxy);
           this.tier = tier.id;
           this.providers = tier.providers;
           this.label = tier.label;
-          return { tier: tier.id, label: tier.label, threads: this.threadCount };
+          this.proxied = useProxy;
+          return { tier: tier.id, label: tier.label, threads: this.threadCount, proxy: this.proxied };
         } catch (err) {
           const detail = `${tier.id}${attempt > 1 ? ` (attempt ${attempt})` : ''}: ${err.message}`;
           failures.push(detail);
@@ -104,7 +117,7 @@ export class Runtime {
     throw new Error(this.lastError);
   }
 
-  async _startTier(tier, bust, onStage) {
+  async _startTier(tier, bust, onStage, useProxy = false) {
     onStage('LOADING COMPUTE RUNTIME', 0.2);
     try { delete window.ort; } catch { window.ort = undefined; }
     await new Promise((resolve, reject) => {
@@ -148,15 +161,52 @@ export class Runtime {
     this._blobUrls.push(mjsBlob, wasmBlob);
 
     ort.env.wasm.simd = true;
-    ort.env.wasm.proxy = false;
+    ort.env.wasm.proxy = useProxy === true;
     ort.env.wasm.numThreads = self.crossOriginIsolated
       ? Math.max(1, Math.min(4, navigator.hardwareConcurrency || 4))
       : 1;
     ort.env.logLevel = 'error';
     this.env = ort.env;
+    // Prove the whole chain — worker spawn (when proxied), blob-binary import,
+    // session build, run, output read — before declaring the tier usable.
+    // A runtime that only half-works must fail here, at boot, with a retry,
+    // not three seconds later inside a camera frame.
+    await this._smokeTest(useProxy);
     onStage('COMPUTE RUNTIME READY', 0.35);
-    this.onLog(`runtime: ${tier.label}, threads=${ort.env.wasm.numThreads}, isolated=${!!self.crossOriginIsolated}`);
+    this.onLog(`runtime: ${tier.label}, threads=${ort.env.wasm.numThreads}, proxy=${!!useProxy}, isolated=${!!self.crossOriginIsolated}`);
     return ort;
+  }
+
+  /**
+   * Create and run a 1-op Identity model end to end. The graph is a ~130-byte
+   * protobuf built here, so the check costs nothing to ship and exercises
+   * exactly the path every session will take (same EP, same proxy setting,
+   * same wasm binary).
+   */
+  async _smokeTest(useProxy) {
+    // The tier's own provider list — the exact path the detector takes.
+    await this._smokeSession(this.providers);
+    // On a GPU tier, the classifier/OCR/pose sessions deliberately run on the
+    // CPU EP, which under the proxy is a different worker-side path; prove it
+    // too, so nothing can pass boot and fail three seconds into a frame.
+    if (useProxy && this.providers.some((p) => p !== 'wasm')) {
+      await this._smokeSession(['wasm']);
+    }
+    return true;
+  }
+
+  async _smokeSession(providers) {
+    const session = await this.ort.InferenceSession.create(smokeModelBytes(), {
+      executionProviders: providers,
+      graphOptimizationLevel: 'basic'
+    });
+    const input = new this.ort.Tensor('float32', new Float32Array([1]), [1]);
+    const feeds = {};
+    feeds[session.inputNames[0]] = input;
+    const out = await session.run(feeds);
+    const got = out[session.outputNames[0]];
+    if (!got || got.data?.[0] !== 1) throw new Error('runtime smoke test returned a wrong answer');
+    await session.release?.();
   }
 
   /**
@@ -185,7 +235,8 @@ export class Runtime {
       url, label, providers,
       bytes: bytes.length,
       sha256: digest,
-      loadMs: Math.round(performance.now() - started)
+      loadMs: Math.round(performance.now() - started),
+      ort: this.ort
     });
     this.sessions.set(url, wrapper);
     this.onLog(`model ready — ${label}, ${(bytes.length / 1048576).toFixed(1)} MB, ${wrapper.loadMs} ms, ${providers.join('>')}`);
@@ -198,11 +249,56 @@ export class Runtime {
   }
 }
 
+/**
+ * A minimal valid ONNX model — one Identity node, one float input, one float
+ * output — encoded as protobuf bytes at call time. It is the boot smoke test's
+ * workload: cheap to build, and it exercises the exact session path (EP,
+ * proxy, wasm binary) that every real model will take.
+ */
+export function smokeModelBytes() {
+  // protobuf primitives
+  const varint = (n) => {
+    const out = [];
+    let v = n;
+    do { let b = v & 0x7f; v >>>= 7; if (v) b |= 0x80; out.push(b); } while (v);
+    return out;
+  };
+  const tag = (field, wire) => varint((field << 3) | wire);
+  const lenField = (field, payload) => [...tag(field, 2), ...varint(payload.length), ...payload];
+  const stringField = (field, s) => lenField(field, [...new TextEncoder().encode(s)]);
+  const intField = (field, n) => [...tag(field, 0), ...varint(n)];
+
+  // TensorType { elem_type: 1 (FLOAT), shape { dim { dim_value: 1 } } }
+  const dim = lenField(1, intField(1, 1));
+  const shape = lenField(2, lenField(1, dim));
+  const tensorType = lenField(1, [...intField(1, 1), ...shape]);
+  const valueInfo = (name) => lenField(11 + (name === 'y' ? 1 : 0), [...stringField(1, name), ...lenField(2, tensorType)]);
+
+  const node = lenField(1, [
+    ...stringField(1, 'x'),                 // input
+    ...stringField(2, 'y'),                 // output
+    ...stringField(4, 'Identity')           // op_type
+  ]);
+  const graph = lenField(7, [
+    ...node,
+    ...stringField(2, 'argus-smoke'),
+    ...valueInfo('x'),                      // field 11: input
+    ...valueInfo('y')                       // field 12: output
+  ]);
+  const model = [
+    ...intField(1, 6),                      // ir_version
+    ...lenField(8, intField(2, 13)),        // opset_import { domain: "" (default), version: 13 }
+    ...graph
+  ];
+  return new Uint8Array(model);
+}
+
 /** Wrapper that serialises runs: ORT sessions are not re-entrant per frame. */
 export class Session {
   constructor(session, meta = {}) {
     this.session = session;
     this.meta = meta;
+    this.ort = meta.ort || null;      // the ORT namespace, for tensor construction
     this.inputs = session.inputNames;
     this.outputs = session.outputNames;
     // Declared tensor shapes. Fixed-shape graphs (the quantised pose model is
@@ -242,10 +338,17 @@ export class Session {
     return task;
   }
 
-  /** Warm the graph with a correctly-shaped zero tensor so frame 1 is not slow. */
+  /**
+   * Warm the graph with a correctly-shaped zero tensor so frame 1 is not slow.
+   * The tensor must carry the declared dims: a bare typed array would be read
+   * as a rank-1 tensor, rejected by every graph here, and the failure was
+   * swallowed as "best-effort" — so every first pass paid ORT's cold start.
+   */
   async warmup(shape, dtype = 'float32') {
+    if (!this.ort) return;
+    const data = new Float32Array(shape.reduce((a, b) => a * b, 1));
     const feeds = {};
-    feeds[this.inputs[0]] = new Float32Array(shape.reduce((a, b) => a * b, 1));
+    feeds[this.inputs[0]] = new this.ort.Tensor(dtype, data, [...shape]);
     try { await this.run(feeds); } catch { /* warmup is best-effort */ }
   }
 }
@@ -338,14 +441,37 @@ export async function sha256(bytes) {
 
 /* ------------------------------------------------------------------ *
  * Canvas / ImageData plumbing
+ *
+ * Every canvas here is pooled: allocating a 2-D backing store (and the
+ * readback buffer that follows it) on each call is one of the most expensive
+ * things a per-frame vision loop can do on a phone. Each named scratch slot
+ * keeps exactly one canvas and grows it only when the requested size changes.
  * ------------------------------------------------------------------ */
 
-let scratchCanvas = null;
-function scratch(w, h) {
-  if (!scratchCanvas) scratchCanvas = document.createElement('canvas');
-  if (scratchCanvas.width !== w) scratchCanvas.width = w;
-  if (scratchCanvas.height !== h) scratchCanvas.height = h;
-  return scratchCanvas;
+const scratchPool = new Map();
+export function scratch(key, w, h) {
+  let c = scratchPool.get(key);
+  if (!c) {
+    c = document.createElement('canvas');
+    scratchPool.set(key, c);
+  }
+  if (c.width !== w) c.width = w;
+  if (c.height !== h) c.height = h;
+  return c;
+}
+
+export function ctx2d(c) {
+  return c.getContext('2d', { willReadFrequently: true });
+}
+
+/**
+ * Draw an ImageData into a pooled canvas and return it — the shared first
+ * half of every "ImageData in, resized ImageData out" operation below.
+ */
+export function putFrame(img, key) {
+  const src = scratch(key, img.width, img.height);
+  ctx2d(src).putImageData(img, 0, 0);
+  return src;
 }
 
 /** Resize but keep the aspect ratio — used everywhere a model wants "fit". */
@@ -355,27 +481,20 @@ export function fitSize(w, h, target, mode = 'min') {
 }
 
 export function resizeImageData(src, w, h) {
-  const c = scratch(w, h);
-  const ctx = c.getContext('2d', { willReadFrequently: true });
-  ctx.clearRect(0, 0, w, h);
-  // Draw the source through a temporary bitmap so any ImageData/Canvas is valid.
-  const srcCanvas = document.createElement('canvas');
-  srcCanvas.width = src.width; srcCanvas.height = src.height;
-  srcCanvas.getContext('2d').putImageData(src, 0, 0);
+  const c = scratch('resize', Math.max(1, w), Math.max(1, h));
+  const ctx = ctx2d(c);
+  ctx.clearRect(0, 0, c.width, c.height);
   ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(srcCanvas, 0, 0, w, h);
-  return ctx.getImageData(0, 0, w, h);
+  ctx.drawImage(putFrame(src, 'resize-src'), 0, 0, c.width, c.height);
+  return ctx.getImageData(0, 0, c.width, c.height);
 }
 
 export function cropImageData(src, x, y, w, h) {
-  const c = scratch(Math.max(1, w), Math.max(1, h));
-  const ctx = c.getContext('2d', { willReadFrequently: true });
+  const c = scratch('crop', Math.max(1, w), Math.max(1, h));
+  const ctx = ctx2d(c);
   ctx.clearRect(0, 0, c.width, c.height);
-  const srcCanvas = document.createElement('canvas');
-  srcCanvas.width = src.width; srcCanvas.height = src.height;
-  srcCanvas.getContext('2d').putImageData(src, 0, 0);
-  ctx.drawImage(srcCanvas, x, y, w, h, 0, 0, c.width, c.height);
+  ctx.drawImage(putFrame(src, 'crop-src'), x, y, w, h, 0, 0, c.width, c.height);
   return ctx.getImageData(0, 0, c.width, c.height);
 }
 
@@ -448,21 +567,37 @@ export function toTensor(img, {
   const c = 3;
   const n = w * h;
   const out = output === 'uint8' ? new Uint8Array(n * c) : new Float32Array(n * c);
-  if (layout === 'NCHW') {
-    for (let i = 0; i < n; i++) {
+  if (output === 'uint8') {
+    if (layout === 'NCHW') {
       for (let ch = 0; ch < c; ch++) {
-        out[ch * n + i] = output === 'uint8'
-          ? data[i * 4 + ch]
-          : (data[i * 4 + ch] * scale - mean) / std;
+        const base = ch * n;
+        for (let i = 0; i < n; i++) out[base + i] = data[i * 4 + ch];
       }
+    } else {
+      for (let i = 0; i < n; i++) {
+        const s = i * 4; const d = i * 3;
+        out[d] = data[s]; out[d + 1] = data[s + 1]; out[d + 2] = data[s + 2];
+      }
+    }
+    return out;
+  }
+  // Precompute the affine terms once: (v * scale - mean) / std ===
+  // v * k + b, so the inner loop is one multiply and one add per element.
+  const k = scale / std;
+  const b = -mean / std;
+  if (layout === 'NCHW') {
+    // Channel-outer keeps the writes contiguous; the read stride is a fixed 4.
+    for (let ch = 0; ch < c; ch++) {
+      const base = ch * n;
+      let s = ch;
+      for (let i = 0; i < n; i++, s += 4) out[base + i] = data[s] * k + b;
     }
   } else {
     for (let i = 0; i < n; i++) {
-      for (let ch = 0; ch < c; ch++) {
-        out[i * c + ch] = output === 'uint8'
-          ? data[i * 4 + ch]
-          : (data[i * 4 + ch] * scale - mean) / std;
-      }
+      const s = i * 4; const d = i * 3;
+      out[d] = data[s] * k + b;
+      out[d + 1] = data[s + 1] * k + b;
+      out[d + 2] = data[s + 2] * k + b;
     }
   }
   return out;
@@ -530,11 +665,7 @@ export function nms(dets, iouThreshold = 0.45, mode = 'class') {
       if (suppressed.has(j)) continue;
       const b = sorted[j];
       if (mode === 'class' && a.cls !== b.cls) continue;
-      const overlap = iou(a.box, b.box);
-      const small = Math.min(boxArea(a.box), boxArea(b.box));
-      const inside = small > 0 && iou(a.box, b.box) > 0.75 && iou(a.box, b.box) * (boxArea(a.box) + boxArea(b.box) - iou(a.box, b.box) * 0) > 0
-        ? false : false;   // containment handled by IoU below
-      if (overlap > iouThreshold || inside) suppressed.add(j);
+      if (iou(a.box, b.box) > iouThreshold) suppressed.add(j);
     }
   }
   return keep;

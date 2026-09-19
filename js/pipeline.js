@@ -8,18 +8,20 @@
  *     source: 'brand', box: [...], text: 'Galaxy S24', brand: {...},
  *     posture: 'standing', activity: { id: 'standing', label: 'standing' } }
  *
- * Two clocks run here. Detection and the classifier are *in the frame*: they
- * are cheap enough (tens of milliseconds) and the overlay needs them now — the
- * first tag must land on the first frame. OCR and pose are *behind* the frame:
- * they cost 100-600 ms each, so they run as background jobs and their results
- * attach to the next frame's records by geometry. A camera that stutters to
- * read a sign is worse than one that reads the sign a third of a second late.
+ * The budget rules in here are what make the app feel instant, and they are
+ * all measured (tools/bench-perf.mjs prints the per-stage costs they were
+ * set from):
  *
- * The fusion rules matter more than any single model. A detector saying
- * "phone", a classifier saying "iPod" and OCR reading "Samsung" produce one
- * answer, not three: brand text read off the object wins (it is printed on the
- * thing itself), then a confident classifier answer compatible with the
- * detected class, then the detected class.
+ *   · the full-frame detector is the only work that happens *in* the frame,
+ *     at an adaptive scan size that starts small and grows only when the
+ *     device proves it can afford more;
+ *   · the detail sweep is interleaved — one 2×2 tile per frame on a fast
+ *     device, never the whole block on top of every frame;
+ *   · the classifier, OCR, pose and hands run behind the frame, one job at a
+ *     time, and a job that cannot earn its cost on the current device simply
+ *     never starts;
+ *   · a job's results attach to the next frame's records, so the feed never
+ *     waits for a refinement.
  */
 
 import { Detector } from './detector.js';
@@ -31,7 +33,7 @@ import { Rolling, clamp, iou, nms, boxArea } from './core.js';
 import {
   lookup, nameFor, tierOf, matchBrand, displayName, categoryOf
 } from './kb.js';
-import { COCO_META } from './config.js';
+import { COCO_META, CONFIG } from './config.js';
 
 export class Pipeline {
   constructor({ runtime, settings, onLog = () => {}, onStatus = () => {} } = {}) {
@@ -40,7 +42,7 @@ export class Pipeline {
     this.onLog = onLog;
     this.onStatus = onStatus;
 
-    this.detector = new Detector({ runtime, onLog });
+    this.detector = new Detector({ runtime, onLog, defaultSize: Number(settings.scanSize) || CONFIG.scanSize });
     this.classifier = new Classifier({ runtime, onLog });
     this.ocr = new Ocr({ runtime, onLog });
     this.pose = new Pose({ runtime, onLog });
@@ -50,10 +52,10 @@ export class Pipeline {
       smooth: settings.trackSmooth || 0.55
     });
 
-    this.timers = { detect: 0, ocr: 0, pose: 0, hands: 0 };
+    this.timers = { detect: 0, ocr: 0, pose: 0, hands: 0, tile: 0, adapt: 0 };
     this.latency = new Rolling(24);
-    this._frameMs = new Rolling(12);          // full-frame-only detector time
-    this.scanSize = Number(settings.scanSize) || 416;
+    this._frameMs = new Rolling(10);          // full-frame-only detector time
+    this.scanSize = Number(settings.scanSize) || CONFIG.scanSize;
     this.lastRecords = [];
     this.lastTexts = [];
     this.lastInferMs = 0;
@@ -62,6 +64,10 @@ export class Pipeline {
     this._bgPose = false;
     this._bgHands = false;
     this._running = false;
+    this._tileCursor = 0;                     // round-robin over the 2×2 plan
+    this._bgQueue = Promise.resolve();        // background jobs run one at a time
+    this._firstFrameAt = 0;
+    this._lastOcrSignature = null;
     this.stats = { frames: 0, detections: 0, classifications: 0, ocrRuns: 0, poseRuns: 0, frameMs: 0 };
   }
 
@@ -106,13 +112,19 @@ export class Pipeline {
     return true;
   }
 
-  /** Optional modules never hold up first light: failures are logged, not thrown. */
-  async enableAll({ onProgress = () => {}, modules = null } = {}) {
+  /**
+   * Optional modules never hold up first light: failures are logged, not
+   * thrown. With `stagger`, a short gap separates each module's download and
+   * session build, so four graphs never compile back-to-back at boot while
+   * the user is already pointing the camera at things.
+   */
+  async enableAll({ onProgress = () => {}, modules = null, stagger = false } = {}) {
     const wanted = modules || ['classifier', 'ocr', 'pose', 'hands'];
     const done = [];
-    for (const m of wanted) {
-      try { await this.enable(m, { onProgress }); done.push(m); }
-      catch (err) { this.onLog(`warn: ${m} failed to load — ${err.message}`); }
+    for (let i = 0; i < wanted.length; i++) {
+      if (stagger && i > 0) await new Promise((r) => setTimeout(r, 800));
+      try { await this.enable(wanted[i], { onProgress }); done.push(wanted[i]); }
+      catch (err) { this.onLog(`warn: ${wanted[i]} failed to load — ${err.message}`); }
     }
     return done;
   }
@@ -129,16 +141,19 @@ export class Pipeline {
   async processFrame(frame, { time = performance.now() } = {}) {
     if (this._running) return this.snapshot();
     this._running = true;
+    if (!this._firstFrameAt) this._firstFrameAt = time;
     const started = performance.now();
     this.stats.frames++;
 
     try {
       /* --- 1. detect -------------------------------------------------
-       * Always the full frame first: that is the instant path. On a device
-       * that keeps it fast, 2×2 overlapping tiles run on top so small objects
-       * (a plug socket, a key, a label) survive — the tile pass only happens
-       * when the full frame stays inside its budget, so a slow phone never
-       * pays for it. */
+       * Always the full frame first: that is the instant path. The scan
+       * size is governed by measured cost — small at boot (a tag on the
+       * first frame beats a sharper tag on the tenth), growing only while
+       * the device keeps its budget. On a device that keeps the full frame
+       * comfortably fast, ONE tile of the 2×2 plan joins the pass — a full
+       * small-object sweep every four frames, interleaved, so detail never
+       * multiplies the frame cost the way an every-frame tile block did. */
       const s = this.settings;
       const dets = await this.detector.detect(frame, {
         size: this.scanSize,
@@ -149,46 +164,46 @@ export class Pipeline {
       const frameMs = this.detector.lastInferMs;
       this._frameMs.push(frameMs);
       let all = dets;
-      const tiles = this._tileMode();
-      if (tiles) {
+      if (this._tileDue(time)) {
         try {
-          const tiled = await this.detector.detectTiles(frame, {
-            size: this.scanSize,
+          const tiled = await this.detector.detectTile(frame, {
+            index: this._tileCursor++,
+            size: s.tileSize || 288,
             minScore: s.minConfidence,
-            target: tiles,
-            maxDetections: s.maxDetections
+            maxDetections: 8
           });
-          if (tiled.length) all = nms([...dets, ...tiled], 0.5, 'class').slice(0, s.maxDetections * 2);
+          if (tiled.length) all = nms([...dets, ...tiled], 0.5, 'class').slice(0, (s.maxDetections || 24) * 2);
+          this.timers.tile = time;
         } catch (err) {
           this.onLog(`warn: tile pass failed — ${err.message}`);
         }
       }
       this.lastInferMs = Math.round(performance.now() - started);
       this.latency.push(this.lastInferMs);
-      this._adaptScan(frameMs);
+      this._adaptScan(frameMs, time);
       this.timers.detect = time;
       this.stats.detections += all.length;
 
       const prepared = all.map((d) => this._prepareDetection(d));
-      const { live } = this.tracker.update(prepared, time);
+      const { live, born } = this.tracker.update(prepared, time);
 
       /* --- 2. attach background evidence from the previous pass ------- */
       for (const line of this.lastTexts) line.attached = false;
       this._attachText(frame, time);
-      this._attachPose(time);
+      this._attachPose();
 
-      /* --- 3. classifier refinement (in frame, budgeted) -------------- */
-      this._clsBudget = s.classifyBudget || 2;
-      const records = [];
-      for (const track of live) {
-        await this._classify(track, frame, time);
-        records.push(this._record(track, time));
-      }
+      /* --- 3. classify (background, budgeted) --------------------------
+       * The 1000-class pass is real work (hundreds of milliseconds on a
+       * phone), so it no longer rides inside the frame. New tracks jump the
+       * queue — the refinement lands a beat after the tag, not before it —
+       * and the result is written onto the track for the next frame's
+       * record. The first-frame tag is never delayed by it. */
+      this._scheduleClassify(live, born, frame, time);
 
       /* --- 4. schedule background jobs -------------------------------- */
       this._scheduleBackground(frame, live, time);
 
-      this.lastRecords = records;
+      this.lastRecords = live.map((track) => this._record(track, time));
       this.stats.frameMs = Math.round(performance.now() - started);
       return this.snapshot();
     } finally {
@@ -205,24 +220,46 @@ export class Pipeline {
     };
   }
 
-  /** 'auto' → 2×2 tiles only while the full frame stays fast. */
-  _tileMode() {
+  /* ---------------------------------------------------------------- *\
+   * Detectors: the detail sweep and the throughput governor
+   * ---------------------------------------------------------------- */
+
+  /**
+   * The detail sweep fires one tile when: the device has proved the full
+   * frame is cheap (rolling mean under tileBudgetMs) and at least tileGapMs
+   * has passed since the last tile. Slow devices never see a tile; fast ones
+   * get the whole 2×2 sweep between full-frame passes for free.
+   */
+  _tileDue(time) {
     const mode = this.settings.detailMode;
-    if (mode === '4') return 2;
-    if (mode === '9') return 3;
-    if (mode === 'auto') {
-      const n = this._frameMs.items.length;
-      return n >= 3 && this._frameMs.mean < (this.settings.tileBudgetMs || 90) ? 2 : null;
-    }
-    return null;
+    if (mode !== 'auto' && mode !== '4' && mode !== '9') return false;
+    if (this._frameMs.items.length < 3) return false;
+    if (this._frameMs.mean >= (this.settings.tileBudgetMs || 55)) return false;
+    return time - this.timers.tile >= (this.settings.tileGapMs || 450);
   }
 
-  /** Detector throughput governor: keep the full frame inside ~110 ms. */
-  _adaptScan(ms) {
-    const ceiling = Number(this.settings.scanSize) || 416;
-    const floor = Number(this.settings.scanFloor) || 320;
-    if (ms > 110 && this.scanSize > floor) this.scanSize = Math.max(floor, this.scanSize - 32);
-    else if (ms < 55 && this.scanSize < ceiling) this.scanSize = Math.min(ceiling, this.scanSize + 32);
+  /**
+   * Detector throughput governor. The measured full-frame cost walks the
+   * scan size between the floor and the ceiling: above ~1.5× the budget it
+   * sheds 32 px, below ~0.7× it buys 32 px back. Re-evaluated at most twice
+   * a second so a single slow frame (a hand across the lens) cannot thrash
+   * the size.
+   */
+  _adaptScan(ms, time) {
+    const ceiling = Number(this.settings.scanCeiling) || 416;
+    const floor = Number(this.settings.scanFloor) || 256;
+    const budget = Number(this.settings.scanBudgetMs) || 70;
+    if (time - this.timers.adapt < 500) return;
+    if (this._frameMs.items.length < 2) return;
+    const mean = this._frameMs.mean;
+    let next = this.scanSize;
+    if (mean > budget * 1.5 && this.scanSize > floor) next = Math.max(floor, this.scanSize - 32);
+    else if (mean < budget * 0.7 && this.scanSize < ceiling) next = Math.min(ceiling, this.scanSize + 32);
+    if (next !== this.scanSize) {
+      this.scanSize = next;
+      this.timers.adapt = time;
+      this.onLog(`scan: ${next}px (full frame ${Math.round(mean)} ms)`);
+    }
   }
 
   /** Map a raw detection into ARGUS vocabulary. */
@@ -239,87 +276,120 @@ export class Pipeline {
   }
 
   /* ---------------------------------------------------------------- *\
-   * In-frame stage
+   * Classifier refinement (background, budgeted, new tracks first)
    * ---------------------------------------------------------------- */
 
   /**
-   * Refine the detector's answer with the 1000-class classifier. New tracks
-   * are classified on their first pass (budget permitting); established ones
-   * refresh at the configured cadence.
+   * Queue classifier work for this frame: at most classifyBudget crops, new
+   * tracks first (their first refinement is the one the user is waiting
+   * for), then the stalest refresh. The crop is taken immediately — frames
+   * are not retained — and the inference joins the serial background queue,
+   * so it never delays the frame that scheduled it.
    */
-  async _classify(track, frame, time) {
+  _scheduleClassify(live, born, frame, time) {
     const s = this.settings;
     if (!this.classifier.ready) return;
-    if (this._clsBudget <= 0) return;
-    const area = (track.box[2] - track.box[0]) * (track.box[3] - track.box[1]);
-    if (area < frame.width * frame.height * (s.classifyMinArea || 0.002)) return;
-    const due = !track.classifier || time - (track.lastClassified || 0) > (s.classifyEvery || 500);
-    if (!due) return;
-    this._clsBudget--;
-    track.lastClassified = time;
-    const crop = this._crop(frame, track.box, 0.08);
-    if (!crop) return;
-    try {
-      const result = await this.classifier.classify(crop, { topK: s.classifyTopK || 5, embed: false });
-      this.stats.classifications++;
-      if (!result.top.length) return;
-      track.classifier = result.top;
-      const refined = refineFromClassifier(track.label || track.cls, result.top);
-      if (refined.refined) {
-        track.refined = refined.refined;
-        track.refineConfidence = refined.confidence;
-      } else {
-        track.refined = null;
-        track.refineConfidence = 0;
-      }
-    } catch (err) {
-      this.onLog(`warn: classifier pass failed — ${err.message}`);
+    const budget = Math.max(1, s.classifyBudget || 1);
+    const minArea = frame.width * frame.height * (s.classifyMinArea || 0.002);
+
+    const due = live.filter((track) => {
+      if (track._clsInFlight) return false;
+      if (boxArea(track.box) < minArea) return false;
+      return !track.classifier || time - (track.lastClassified || 0) > (s.classifyEvery || 2000);
+    });
+    if (!due.length) return;
+    const bornIds = new Set(born.map((t) => t.id));
+    due.sort((a, b) => (bornIds.has(b.id) ? 1 : 0) - (bornIds.has(a.id) ? 1 : 0)
+      || (a.lastClassified || 0) - (b.lastClassified || 0));
+
+    for (const track of due.slice(0, budget)) {
+      const crop = this._crop(frame, track.box, 0.08);
+      if (!crop) continue;
+      track._clsInFlight = true;
+      track.lastClassified = time;
+      this._enqueue(async () => {
+        try {
+          const result = await this.classifier.classify(crop, { topK: s.classifyTopK || 5, embed: false });
+          this.stats.classifications++;
+          if (result.top.length) {
+            track.classifier = result.top;
+            const refined = refineFromClassifier(track.label || track.cls, result.top);
+            track.refined = refined.refined;
+            track.refineConfidence = refined.refined ? refined.confidence : 0;
+          }
+        } catch (err) {
+          this.onLog(`warn: classifier pass failed — ${err.message}`);
+        } finally {
+          track._clsInFlight = false;
+        }
+      }, 'classifier pass');
     }
   }
 
   /* ---------------------------------------------------------------- *\
-   * Background jobs (never block a frame)
+   * Background jobs (never block a frame, never overlap each other)
    * ---------------------------------------------------------------- */
+
+  /**
+   * Serial background work. One job runs at a time, in priority order
+   * (classifier > OCR > pose > hands): on the CPU tier every inference is
+   * real compute, and two jobs at once halve the detector's throughput for
+   * their whole overlap.
+   */
+  _enqueue(job, kind = 'job') {
+    this._bgQueue = this._bgQueue
+      .then(job)
+      .catch((err) => this.onLog(`warn: ${kind} failed — ${err.message || err}`));
+    return this._bgQueue;
+  }
 
   _scheduleBackground(frame, live, time) {
     const s = this.settings;
 
-    if (this.ocr.ready && !this._bgOcr && time - this.timers.ocr > (s.ocrEvery || 1600)) {
+    /* OCR — naming-critical, so it runs on every device, but it earns its
+     * cost honestly: after the first tags have settled, on a cadence, and
+     * never twice for an unchanged scene. */
+    if (this.ocr.ready && !this._bgOcr
+      && time - this._firstFrameAt > (s.ocrSettleMs || 1200)
+      && time - this.timers.ocr > (s.ocrEvery || 2400)
+      && !this._sceneUnchanged(frame)) {
       this._bgOcr = true;
       this.timers.ocr = time;
-      Promise.resolve()
-        .then(() => this.ocr.read(frame, { minConfidence: s.ocrMinConfidence, maxLines: s.ocrMaxLines }))
-        .then((out) => {
-          this.stats.ocrRuns++;
-          this._recordTexts(out.lines, time);
-        })
-        .catch((err) => this.onLog(`warn: OCR pass failed — ${err.message}`))
-        .finally(() => { this._bgOcr = false; });
+      this._lastOcrSignature = this._sceneSignature(frame);   // reference: the frame we are about to read
+      this._enqueue(() => this.ocr.read(frame, {
+        minConfidence: s.ocrMinConfidence,
+        maxLines: s.ocrMaxLines,
+        maxSide: s.ocrMaxSide || 512
+      }).then((out) => {
+        this.stats.ocrRuns++;
+        this._recordTexts(out.lines, time);
+      }).finally(() => { this._bgOcr = false; }), 'OCR pass');
     }
 
-    // Pose only runs while a person is actually in view.
+    // Pose only while a person is actually in view, and only while the device
+    // is keeping up — the pose graph's fixed 640 px input costs more than the
+    // detector itself on the CPU tier, and a posture word is not worth frames.
+    const deviceFast = this._frameMs.items.length >= 3 && this._frameMs.mean < (s.bgFrameBudgetMs || 45);
+    if (!deviceFast) return;
+
     const people = live.filter((t) => t.cls === 'person' || t.category === 'person');
-    if (this.pose.bodyReady && people.length && !this._bgPose && time - this.timers.pose > (s.poseEvery || 550)) {
+    if (this.pose.bodyReady && people.length && !this._bgPose && time - this.timers.pose > (s.poseEvery || 4000)) {
       this._bgPose = true;
       this.timers.pose = time;
-      Promise.resolve()
-        .then(() => this.pose.detectBodies(frame, { minScore: 0.35 }))
-        .then((bodies) => {
-          this.stats.poseRuns++;
-          this.lastPoses = bodies.map((body) => {
-            let best = null; let bestIou = 0.2;
-            for (const p of people) {
-              const overlap = iou(p.box, body.box);
-              if (overlap > bestIou) { bestIou = overlap; best = p.id; }
-            }
-            return { id: best, box: body.box, kpts: body.kpts, posture: body.posture, score: body.score };
-          });
-        })
-        .catch((err) => this.onLog(`warn: pose pass failed — ${err.message}`))
-        .finally(() => { this._bgPose = false; });
+      this._enqueue(() => this.pose.detectBodies(frame, { minScore: 0.35 }).then((bodies) => {
+        this.stats.poseRuns++;
+        this.lastPoses = bodies.map((body) => {
+          let best = null; let bestIou = 0.2;
+          for (const p of people) {
+            const overlap = iou(p.box, body.box);
+            if (overlap > bestIou) { bestIou = overlap; best = p.id; }
+          }
+          return { id: best, box: body.box, kpts: body.kpts, posture: body.posture, score: body.score };
+        });
+      }).finally(() => { this._bgPose = false; }), 'pose pass');
     }
 
-    if (this.pose.handReady && this.lastPoses?.length && !this._bgHands && time - this.timers.hands > (s.handEvery || 700)) {
+    if (this.pose.handReady && this.lastPoses?.length && !this._bgHands && time - this.timers.hands > (s.handEvery || 3000)) {
       this._bgHands = true;
       this.timers.hands = time;
       const wrists = [];
@@ -330,19 +400,48 @@ export class Pipeline {
           }
         }
       }
-      Promise.resolve()
-        .then(() => (wrists.length ? this.pose.handsNear(frame, wrists, { minScore: 0.3 }) : []))
+      this._enqueue(() => (wrists.length ? this.pose.handsNear(frame, wrists, { minScore: 0.3 }) : [])
         .then((hands) => { this.lastHands = hands; })
         .catch(() => { /* gestures are a bonus, never an error */ })
-        .finally(() => { this._bgHands = false; });
+        .finally(() => { this._bgHands = false; }), 'hands pass');
     }
   }
 
   /**
+   * A 32×18 luma signature of the frame, sampled in well under a
+   * millisecond. OCR compares against the last frame it actually read: a
+   * still scene is not read again, but slow drift accumulates against a
+   * fixed reference, so any real change triggers a fresh read promptly.
+   */
+  _sceneSignature(frame) {
+    const cols = 32; const rows = 18;
+    const sig = new Float32Array(cols * rows);
+    const { width: w, height: h, data } = frame;
+    for (let ry = 0; ry < rows; ry++) {
+      const y = Math.min(h - 1, ((ry + 0.5) * h / rows) | 0);
+      for (let cx = 0; cx < cols; cx++) {
+        const x = Math.min(w - 1, ((cx + 0.5) * w / cols) | 0);
+        const i = (y * w + x) * 4;
+        sig[ry * cols + cx] = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      }
+    }
+    return sig;
+  }
+
+  _sceneUnchanged(frame) {
+    const prev = this._lastOcrSignature;
+    if (!prev) return false;
+    const sig = this._sceneSignature(frame);
+    let diff = 0;
+    for (let i = 0; i < sig.length; i++) diff += Math.abs(sig[i] - prev[i]);
+    return diff / sig.length < (this.settings.ocrStillSkip || 5.5);
+  }
+
+  /**
    * OCR lines are kept for ~4 s after last seen, so text chips do not flicker
-   * between the 1.6 s OCR passes. A line sits on a track when it overlaps it;
-   * on a track it becomes part of the object's name (brand / sign), and only
-   * lines that sit on no object are drawn as their own quiet chip.
+   * between passes. A line sits on a track when it overlaps it; on a track it
+   * becomes part of the object's name (brand / sign), and only lines that sit
+   * on no object are drawn as their own quiet chip.
    */
   _recordTexts(lines, time) {
     for (const line of lines) {

@@ -14,14 +14,17 @@ only other chrome is a two-line status readout (what is in view, and that it
 all happens on-device).
 
 ```
-   camera ──► detector (full frame + adaptive tiles)
-                  │
+   camera ──► detector (full frame every pass; one interleaved 2×2 tile
+                  │      on devices that can spare it)
                   ▼
                tracker ──► records ──────────────► overlay (name + confidence)
                   ▲
-   classifier (1000-class) ──┤  in frame, budgeted
+   classifier (1000-class) ──┤  background queue, new tracks first
    OCR: text + brands + signs ┘  background, attached by geometry
-   pose + hands (people)        ┘  background, posture/gesture word
+   pose + hands (people)        ┘  background, fast devices only
+
+   every graph runs in the runtime's proxy worker — inference, however long,
+   never blocks the feed or the overlay
 ```
 
 ---
@@ -50,20 +53,26 @@ the app hashes each model as it loads, so "the fetch returned 200" becomes
 
 ## How a tag gets made
 
-1. **Detect (in frame).** YOLOv8 runs the full frame at an adaptive size
-   (320–416 px, kept inside ~110 ms). On a device that stays fast, a 2×2
-   tile pass runs on top so small objects keep being found — it never runs
-   where it would cost the latency budget.
+1. **Detect (in frame).** YOLOv8 runs the full frame every pass at an
+   adaptive scan size: 320 px at boot, walking between 256 and 416 px to hold
+   the measured cost near the device's budget, so a slow phone gets ~10
+   detection passes a second and a fast one gets far more. On a device with
+   head-room, ONE tile of the 2×2 detail plan joins the pass (a full sweep
+   every four frames) so small objects keep being found — detail never
+   doubles a frame's cost.
 2. **Track.** Detections become tracks (greedy IoU + proximity + class), so
    the outline is stable and each object keeps its identity and age.
 3. **Tag (first frame).** The overlay draws the outline and the chip —
    name, confidence, category dot — the moment the track exists. A 160 ms
    fade-in is all the animation there is.
-4. **Refine (background).** The 1 000-class classifier re-reads each object
-   (budgeted, ~every 500 ms); OCR reads text, brands and signs; pose and
-   hands read people. Results attach to the next frame's records by geometry
-   — the tag sharpens (*phone → Samsung phone*, *person → seated*) without
-   ever stuttering the feed.
+4. **Refine (background, one job at a time).** The 1 000-class classifier
+   re-reads new objects first, then refreshes them on a 2 s cadence; OCR
+   reads text, brands and signs every ~2.4 s (capped at 512 px on the long
+   edge, and skipped entirely while the scene is still); pose and hands read
+   people on fast devices only. Everything runs in the runtime worker and
+   attaches to the next frame's records by geometry — the tag sharpens
+   (*phone → Samsung phone*, *person → seated*) without ever stuttering the
+   feed.
 
 The fusion rule for the label: **safety sign read off the object > brand
 text > classifier refinement > detector class.**
@@ -92,12 +101,24 @@ browser uses, checks their digests against `models/manifest.json`, pushes
 the fusion naming, and prints what ARGUS saw field by field. It exits non-zero
 if any check fails, so it can gate a release.
 
+Two more tools tune and prove the speed itself: `tools/bench-perf.mjs` prints
+the per-stage latency table the runtime constants were set from, and
+`tools/bench-spin.mjs` simulates a full camera sweep, reporting per-frame
+detection cost and the frame on which each object first got its tag.
+
 The dev server sends `Cross-Origin-Opener-Policy` and
 `Cross-Origin-Embedder-Policy` so the page is cross-origin isolated, which is
 what lets onnxruntime-web use SharedArrayBuffer and multiple threads.
 `netlify.toml` and `vercel.json` ship the same headers for production; hosts
 that cannot set response headers simply fall back to single-threaded
 inference, which still works.
+
+The runtime boots through ORT's **proxy worker**: graph execution — CPU and
+GPU alike — happens off the main thread, so a long OCR or pose pass delays
+the next inference, never the feed. Boot proves the whole chain (worker,
+wasm binary, session, run) with a 77-byte identity graph before declaring the
+runtime usable, and falls back to in-thread inference if a webview refuses
+the worker.
 
 `npm test` runs four suites: **logic** (knowledge base, naming rules,
 tracker, pose interpretation, NMS/geometry), **assets** (every import
@@ -160,10 +181,15 @@ tools/verify-models.mjs  model verifier
   classifier, the text reading, or the knowledge base — a wall socket with no
   label is named by the classifier chain, not by the detector.
 * OCR reads what is in frame; very small or glancing text can be missed
-  between passes (1.6 s cadence), and chips persist ~4 s after last seen.
-* Posture and gesture are keypoint heuristics over the pose model's output:
-  a person mostly out of frame gets no word, and ambiguous postures stay
-  silent rather than guess.
+  between passes (~2.4 s cadence, capped at 512 px on the long edge), a still
+  scene is not re-read, and chips persist ~4 s after last seen.
+* Posture and gesture are keypoint heuristics over the pose model's output.
+  The pose graph is fixed at 640 px input and costs more than the detector
+  itself on the CPU tier, so it only runs while the device is comfortably
+  keeping up — on a slow phone the person chip says "person" without a
+  posture word rather than stuttering the feed.
+* A person mostly out of frame gets no posture word, and ambiguous postures
+  stay silent rather than guess.
 * Distances, materials, colour analysis and scene description are not in
   this build by design — the camera recognises and tags, and that is all it
   does.

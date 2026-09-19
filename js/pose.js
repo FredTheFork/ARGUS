@@ -12,7 +12,7 @@
  * "waving") that rides as the quiet second line of the person's tag.
  */
 
-import { fitSize, toTensor, iou } from './core.js';
+import { fitSize, toTensor, iou, scratch, ctx2d, putFrame } from './core.js';
 
 const BODY_URL = 'models/yolov8n-pose.onnx';
 const HAND_URL = 'models/yolov8n-hand.onnx';
@@ -49,7 +49,6 @@ export class Pose {
     this.bodyReady = false;
     this.handReady = false;
     this.lastMs = 0;
-    this.stage = document.createElement('canvas');
   }
 
   async loadBody({ onProgress = () => {} } = {}) {
@@ -58,7 +57,10 @@ export class Pose {
     this.bodyReady = true;
     // The quantised graph is exported at a fixed square size; read it rather
     // than assuming one, and warm the graph at that exact shape.
-    this.bodySize = this.body.fixedSize || 320;
+    // The quantised graph is exported at a fixed square size (640 for the
+    // shipped model). When session metadata is unavailable (proxy runtime),
+    // fall back to the size the manifest declares rather than a guess.
+    this.bodySize = this.body.fixedSize || 640;
     await this.body.warmup([1, 3, this.bodySize, this.bodySize]);
     this.onLog(`pose online — 17-keypoint body tracking at ${this.bodySize}px`);
     return this.body;
@@ -224,17 +226,15 @@ export class Pose {
     const nh = Math.max(1, Math.min(h, Math.round(img.height * scale)));
     const padW = Math.floor((w - nw) / 2);
     const padH = Math.floor((h - nh) / 2);
-    const c = this.stage;
-    c.width = w; c.height = h;
-    const ctx = c.getContext('2d', { willReadFrequently: true });
+    // Pooled canvases: one stage per size, one source per frame size — the
+    // pose pass must not allocate a fresh backing store every run.
+    const c = scratch(`pose-stage-${w}`, w, h);
+    const ctx = ctx2d(c);
     ctx.fillStyle = '#727272';
     ctx.fillRect(0, 0, w, h);
-    const src = document.createElement('canvas');
-    src.width = img.width; src.height = img.height;
-    src.getContext('2d').putImageData(img, 0, 0);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(src, padW, padH, nw, nh);
+    ctx.drawImage(putFrame(img, `pose-src-${img.width}x${img.height}`), padW, padH, nw, nh);
     return { canvas: ctx.getImageData(0, 0, w, h), padW, padH, scale, w, h };
   }
 

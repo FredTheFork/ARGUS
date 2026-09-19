@@ -107,7 +107,12 @@ export class Hud {
       // the heartbeat: sizing here means the canvas is ready before a frame
       // even arrives.
       if (!this.width || !this.height) this.resize();
-      if (this.lastFrame) this.render(this.lastFrame);
+      // Fallback driver only: the app loop paints every animation frame with
+      // fresh state. Painting here as well doubled the canvas work (every tag
+      // measured twice per frame), so this loop now repaints the last state
+      // solely when the app has not painted for a while — blocked inference,
+      // a throttled tab, a paused caller.
+      if (this.lastFrame && t - this._lastPaintAt > 100) this.render(this.lastFrame);
     } catch (err) {
       if (!this._loopWarned) {
         this._loopWarned = true;
@@ -117,8 +122,23 @@ export class Hud {
     requestAnimationFrame((tt) => this._loop(tt));
   }
 
+  /** Cached text measurement: chips re-measure the same strings 60×/s. */
+  _measure(ctx, font, text) {
+    const key = `${font}|${text}`;
+    let w = this._measureCache?.get(key);
+    if (w === undefined) {
+      ctx.font = font;
+      w = ctx.measureText(text).width;
+      if (!this._measureCache) this._measureCache = new Map();
+      if (this._measureCache.size > 512) this._measureCache.clear();
+      this._measureCache.set(key, w);
+    }
+    return w;
+  }
+
   render(state) {
     this.lastFrame = state;
+    this._lastPaintAt = performance.now();
     // A canvas with no box swallows every draw call below without a single
     // error. Ask for a size first: if the box is there now, this very frame
     // draws (rather than being dropped and waiting for the next inference
@@ -199,12 +219,9 @@ export class Hud {
     const fSmall = `500 10.5px ${FONT}`;
     const fSub = `400 10.5px ${FONT}`;
 
-    ctx.font = fMain;
-    const labelW = ctx.measureText(label).width;
-    ctx.font = fSmall;
-    const confW = ctx.measureText(`${conf}%`).width;
-    ctx.font = fSub;
-    const subW = sub ? ctx.measureText(sub).width : 0;
+    const labelW = this._measure(ctx, fMain, label);
+    const confW = this._measure(ctx, fSmall, `${conf}%`);
+    const subW = sub ? this._measure(ctx, fSub, sub) : 0;
 
     const padX = 9;
     const dot = 5;
@@ -259,8 +276,7 @@ export class Hud {
     const [x1, y1] = [px(line.box[0]), py(line.box[1])];
     ctx.save();
     ctx.globalAlpha = 0.92;
-    ctx.font = `400 10.5px ${FONT}`;
-    const w = ctx.measureText(text).width + 14;
+    const w = this._measure(ctx, `400 10.5px ${FONT}`, text) + 14;
     const h = 19;
     let bx = x1;
     let by = y1 - h - 5;

@@ -205,12 +205,16 @@ for (let i = 0; i < FRAMES; i++) {
   const snap = await pipeline.processFrame(videoFrame, { time: performance.now() });
   runs.push({ ms: Date.now() - t0, snapshot: snap });
 }
-// Background jobs (OCR, pose, hands, lighting) attach on later frames; give
-// them a turn so the report describes a settled scene, not the first glance.
-for (let i = 0; i < 6; i++) {
+// Background jobs (classifier, OCR, pose, hands) run behind the frame and
+// attach on later ones; give the serial queue time to drain so the report
+// describes a settled scene, not the first glance. A final pass folds
+// everything that landed into the records.
+for (let i = 0; i < 8; i++) {
   await pipeline.processFrame(videoFrame, { time: performance.now() });
   await new Promise((r) => setTimeout(r, 250));
 }
+await pipeline._bgQueue;                       // let the last scheduled job land
+await pipeline.processFrame(videoFrame, { time: performance.now() });
 const finalSnap = pipeline.snapshot();
 
 const records = finalSnap.records || [];

@@ -269,7 +269,11 @@ async function runModelBoot() {
   }
 
   state.hud.setBootStage('PERCEPTION MODULES', 0.8);
-  state.pipeline.enableAll({}).then(() => {
+  // Staggered on purpose: classifier first (it sharpens names soonest), then
+  // OCR, then pose and hands. Each module's download + session build is real
+  // work; spacing them means the first seconds of live recognition are never
+  // competing with four graphs compiling at once.
+  state.pipeline.enableAll({ stagger: true }).then(() => {
     const exp = state.expectedHashes || {};
     verifySession(state.pipeline.detector.session, exp.detector);
     verifySession(state.pipeline.classifier.session, exp.classifier);
@@ -390,9 +394,10 @@ function grabFrame() {
   }
   const v = state.video;
   if (!v || !v.videoWidth) return null;
-  // Work at a fixed processing width; the detector resizes internally anyway and
-  // a smaller buffer keeps the copy (the expensive part) cheap.
-  const target = Math.min(960, Math.max(480, (state.pipeline?.scanSize || 416) * 1.6));
+  // A fixed processing width. The models letterbox internally anyway; 640 px
+  // keeps the readback copy cheap while leaving the OCR head enough
+  // resolution to read a label at arm's length.
+  const target = Math.min(960, Math.max(480, state.settings.grabWidth || 640));
   const scale = target / v.videoWidth;
   const w = Math.round(v.videoWidth * scale);
   const h = Math.round(v.videoHeight * scale);
@@ -420,6 +425,8 @@ function startLoop() {
   let fpsAcc = 0;
   let fpsCount = 0;
   let lastInferAt = 0;
+  let loggedFirst = false;
+  let loggedPerfAt = 0;
 
   const tick = async (t) => {
     requestAnimationFrame(tick);
@@ -432,7 +439,7 @@ function startLoop() {
       fpsAcc = 0; fpsCount = 0;
     }
 
-    if (!state.busy && t - lastInferAt > 50) {
+    if (!state.busy && t - lastInferAt > (state.settings.inferGapMs || 40)) {
       let frame = null;
       try { frame = grabFrame(); }
       catch (err) { warnOnce('grab', `warn: frame grab failed repeatedly — ${err.message}`); }
@@ -444,6 +451,20 @@ function startLoop() {
       }
     }
     renderHud();
+
+    // Two one-line perf reports: the first pass (the moment a tag became
+    // possible) and then a steady-state line every few seconds, so a field
+    // log answers "how fast is recognition actually running on this device".
+    if (!loggedFirst && state.live) {
+      loggedFirst = true;
+      loggedPerfAt = t;
+      const info = state.pipeline.info();
+      log(`live: first pass done — scan ${info.scanSize}px, detect ${info.lastInferMs} ms`);
+    } else if (loggedFirst && t - loggedPerfAt > 4000) {
+      loggedPerfAt = t;
+      const info = state.pipeline.info();
+      log(`perf: ${state.fps.toFixed(0)} fps display, detect mean ${info.latency.mean} ms (p90 ${info.latency.p90} ms), scan ${info.scanSize}px, modules ${JSON.stringify(info.modules)}`);
+    }
   };
   requestAnimationFrame(tick);
 }
