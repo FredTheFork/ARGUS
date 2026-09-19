@@ -167,13 +167,104 @@ section('stage reveal (regression: boot must not stick)');
 // way the real boot does.
 app.state.cameraStatus = { ok: true };
 app.state.modelStatus = { ok: true };
+// The HUD is built during boot, while #stage is still hidden — in a real
+// browser its canvas measures 0×0 then, and revealing an element fires no
+// window resize. So opening the stage must re-measure the overlay itself.
+let remeasuresAtReveal = 0;
+const realResize = app.state.hud.resize.bind(app.state.hud);
+app.state.hud.resize = (...args) => { remeasuresAtReveal++; return realResize(...args); };
 const entered = app.maybeEnterStage();
+app.state.hud.resize = realResize;
 test('maybeEnterStage opens the stage once both halves are ready', entered === true);
+test('opening the stage re-measures the overlay (no window resize fires on reveal)',
+  remeasuresAtReveal >= 1, `${remeasuresAtReveal} resize() call(s) during enterStage()`);
 test('a second attempt does not re-enter', app.maybeEnterStage() === false);
 await new Promise((r) => setTimeout(r, 460));   // hideBoot fades over 380 ms
 test('boot overlay is dismissed', elements.get('boot').hidden === true);
 test('stage is revealed', elements.get('stage').hidden === false);
 test('no unhandled rejections after stage reveal', errors.length === 0, errors.map((e) => e?.message).join('; '));
+
+/* ── overlay sizing (regression: tags invisible on the live feed) ─────── */
+section('overlay sizing (regression: a hidden stage left a 0×0 canvas)');
+
+// A canvas inside a hidden stage measures 0×0, so the overlay built during
+// boot starts life with no box at all. A 0×0 backing store accepts every draw
+// call and discards the lot: objects are detected, tags are laid out, nothing
+// appears. Nothing about that throws, which is why it needs a test.
+const zeroProbe = makeElement('hud-zero', 'canvas');
+zeroProbe.clientWidth = 0;
+zeroProbe.clientHeight = 0;
+const zeroLog = [];
+{
+  const base = zeroProbe.getContext('2d');
+  const recorder = {};
+  for (const key of Object.keys(base)) {
+    const value = base[key];
+    if (typeof value === 'function') {
+      recorder[key] = (...args) => { zeroLog.push([key, args[0]]); return key === 'measureText' ? { width: 10 } : undefined; };
+    } else recorder[key] = value;
+  }
+  zeroProbe.getContext = () => recorder;
+}
+let zeroErr = null;
+let hudZero = null;
+try {
+  hudZero = new app.state.hud.constructor({ canvas: zeroProbe, video: {}, getSettings: () => app.state.settings });
+} catch (err) {
+  zeroErr = err;
+}
+test('the HUD survives being built against a hidden (0×0) canvas',
+  !zeroErr && !!hudZero,
+  zeroErr ? zeroErr.message : 'built with no box to measure — not locked to a 0×0 store');
+
+// The stage opens: the element has a box now, and no window resize fires.
+// The frame loop is the net that must catch this on its own.
+zeroProbe.clientWidth = 390;
+zeroProbe.clientHeight = 640;
+await new Promise((r) => setTimeout(r, 80));   // several animation frames
+test('the frame loop re-measures a canvas that had no box — tags land on a real backing store',
+  zeroProbe.width === 390 && zeroProbe.height === 640 && hudZero.width === 390 && hudZero.height === 640,
+  `backing store ${zeroProbe.width}×${zeroProbe.height}, viewport ${hudZero.width}×${hudZero.height}`);
+
+// And a frame drawn once measured must actually reach the canvas.
+hudZero.render({
+  frame: { width: 640, height: 480 },
+  records: [{ id: 1, label: 'mug', cls: 'cup', noun: 'mug', category: 'kitchen', confidence: 0.8, box: [10, 10, 100, 100], age: 0, hits: 1 }],
+  texts: [],
+  facing: 'environment'
+});
+test('a frame drawn after the re-measure reaches the canvas',
+  zeroLog.some(([kind]) => kind === 'stroke') && zeroLog.some(([kind, arg]) => kind === 'fillText' && /Mug/i.test(String(arg))),
+  `${zeroLog.length} draw calls`);
+
+// Node has no ResizeObserver, but every browser this ships to does — and it is
+// the only thing watching the box after boot (split-screen, late layout).
+const observed = [];
+const roCallbacks = [];
+class FakeResizeObserver {
+  constructor(cb) { roCallbacks.push(cb); }
+  observe(el) { observed.push(el); }
+  disconnect() {}
+}
+const hadResizeObserver = globalThis.ResizeObserver;
+globalThis.ResizeObserver = FakeResizeObserver;
+const roProbe = makeElement('hud-ro', 'canvas');
+roProbe.clientWidth = 0;
+roProbe.clientHeight = 0;
+roProbe.parentElement = makeElement('hud-ro-parent');
+const hudRo = new app.state.hud.constructor({ canvas: roProbe, video: {}, getSettings: () => app.state.settings });
+test('the overlay observes its own box, not just the window',
+  observed.includes(roProbe) && observed.includes(roProbe.parentElement),
+  `${observed.length} element(s) observed`);
+// Same tick, before the frame loop can get there: this proves the observer.
+roProbe.clientWidth = 411;
+roProbe.clientHeight = 731;
+for (const cb of roCallbacks) cb([]);
+test('a ResizeObserver callback re-measures the canvas',
+  roProbe.width === 411 && roProbe.height === 731 && hudRo.width === 411 && hudRo.height === 731,
+  `${roProbe.width}×${roProbe.height}`);
+if (hadResizeObserver === undefined) delete globalThis.ResizeObserver;
+else globalThis.ResizeObserver = hadResizeObserver;
 
 /* ── the status line reports what is in view ──────────────────────────── */
 section('status line');
