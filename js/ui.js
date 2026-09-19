@@ -58,10 +58,22 @@ export class Hud {
    * without a single error — the overlay silently disappears while the app
    * looks perfectly healthy. So an unmeasurable canvas leaves the last good
    * size (and the last good frame) alone until the box arrives.
+   *
+   * The one exception is the stage itself. The HUD is constructed during boot,
+   * while #stage is still [hidden] — and a hidden element reports no box at
+   * all, in every browser. The stage is `position: fixed; inset: 0`, so its
+   * size *is* the viewport's, and that is what the overlay falls back to. That
+   * way the canvas holds a correct backing store from the first frame rather
+   * than waiting for a reveal that fires no resize event; once layout exists
+   * the canvas's own box takes over and stays authoritative.
    */
   resize() {
-    const { clientWidth: w, clientHeight: h } = this.canvas;
+    const w = this.canvas.clientWidth || window.innerWidth || 0;
+    const h = this.canvas.clientHeight || window.innerHeight || 0;
     if (!(w > 0) || !(h > 0)) return false;
+    // devicePixelRatio moves with zoom, rotation and external displays; read it
+    // here so every re-measure re-syncs the transform as well as the size.
+    this.dpr = Math.min(2, window.devicePixelRatio || 1);
     const bw = Math.round(w * this.dpr);
     const bh = Math.round(h * this.dpr);
     // Assigning either dimension reallocates and clears, so only touch them
@@ -91,10 +103,9 @@ export class Hud {
     // One bad frame must not stop the HUD: without this guard a single
     // exception here ends the requestAnimationFrame chain for good.
     try {
-      // Still no box (the stage is hidden or has not been laid out): keep
-      // asking. This is the net that catches a canvas which was 0×0 at boot
-      // and is never re-measured again — otherwise the overlay draws into
-      // nothing for the life of the page.
+      // Still no box? Keep asking. render() re-measures too, but the loop is
+      // the heartbeat: sizing here means the canvas is ready before a frame
+      // even arrives.
       if (!this.width || !this.height) this.resize();
       if (this.lastFrame) this.render(this.lastFrame);
     } catch (err) {
@@ -108,9 +119,11 @@ export class Hud {
 
   render(state) {
     this.lastFrame = state;
-    // No box, no drawing: every call below would be swallowed by a 0×0
-    // backing store. The frame is kept, so the first real size renders the
-    // current state rather than waiting for the next inference pass.
+    // A canvas with no box swallows every draw call below without a single
+    // error. Ask for a size first: if the box is there now, this very frame
+    // draws (rather than being dropped and waiting for the next inference
+    // pass); if it truly is not, the frame is kept and the next one retries.
+    if (!this.width || !this.height) this.resize();
     if (!this.width || !this.height) return;
     const ctx = this.ctx;
     const s = this.getSettings();
