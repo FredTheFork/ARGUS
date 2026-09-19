@@ -16,10 +16,9 @@ const ROOT = resolve(HERE, '..');
 section('import graph');
 const files = [
   'js/core.js', 'js/config.js', 'js/kb.js', 'js/detector.js', 'js/classify.js', 'js/ocr.js', 'js/pose.js',
-  'js/attributes.js', 'js/tracker.js', 'js/pipeline.js', 'js/memory.js', 'js/agent.js', 'js/ui.js',
-  'js/speech.js', 'js/install.js', 'js/app.js',
+  'js/tracker.js', 'js/pipeline.js', 'js/ui.js', 'js/app.js',
   'js/data/imagenet.js', 'js/data/ocrchars.js', 'js/data/kb-objects.js', 'js/data/kb-objects2.js',
-  'js/data/kb-materials.js', 'js/data/kb-colours.js', 'js/data/kb-brands.js'
+  'js/data/kb-brands.js'
 ];
 
 const namespaces = new Map();
@@ -145,7 +144,7 @@ const referenced = new Set([
   ...[...appSrc.matchAll(/bind\('([\w-]+)'/g)].map((m) => m[1])
 ]);
 const htmlIds = new Set([...html.matchAll(/id="([\w-]+)"/g)].map((m) => m[1]));
-// v2.1 injects no elements at runtime: every id the app or the UI asks for
+// The app injects no elements at runtime: every id the app or the UI asks for
 // must exist in the static markup.
 const missingIds = [...referenced].filter((id) => !htmlIds.has(id));
 test(`app/ui element ids (${referenced.size})`, missingIds.length === 0, missingIds.join(', '));
@@ -186,6 +185,7 @@ const stats = kb.stats();
 test('knowledge base size', stats.objects > 800 && stats.brands > 200, JSON.stringify(stats));
 test('COCO-80 complete', cfg.CLASSES.length === 80, String(cfg.CLASSES.length));
 test('every COCO class has meta', cfg.CLASSES.every((c) => cfg.COCO_META[c]));
-test('themes complete', Object.values(cfg.THEMES).every((t) => t.vars['--accent'] && t.label), Object.keys(cfg.THEMES).join(', '));
-test('phrase bank', Object.keys(cfg.LINES).length >= 50, `${Object.keys(cfg.LINES).length} groups`);
-test('settings defaults', Object.keys(cfg.DEFAULTS).length >= 50, `${Object.keys(cfg.DEFAULTS).length} settings`);
+test('categories cover the overlay palette', Object.keys(cfg.CATEGORIES).length >= 20, `${Object.keys(cfg.CATEGORIES).length} categories`);
+test('runtime config is present and sane',
+  cfg.CONFIG && cfg.CONFIG.minConfidence > 0 && cfg.CONFIG.scanSize >= 256 && cfg.CONFIG.maxLabels > 0,
+  Object.keys(cfg.CONFIG || {}).length ? `${Object.keys(cfg.CONFIG).length} knobs` : 'missing');

@@ -1,8 +1,8 @@
 {
   "name": "argus",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "private": true,
-  "description": "ARGUS — an on-device visual agent, camera-only in v2.1: point it at the world and objects are outlined and named on the feed, hazard alerts aside. The detection, recognition, text and brand reading, colour and material analysis, pose and memory layers all run locally.",
+  "description": "ARGUS — instant on-device object recognition: point the camera and objects are outlined and named on the feed. The full model suite (detection, 1000-class classification, OCR, pose) runs locally; nothing leaves the device.",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
   "engines": {
@@ -17,11 +17,10 @@
   "keywords": [
     "on-device",
     "vision",
+    "object-recognition",
     "onnx",
     "webgpu",
     "wasm",
-    "accessibility",
-    "hud",
     "pwa"
   ],
   "devDependencies": {

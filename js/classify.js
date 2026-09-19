@@ -1,27 +1,15 @@
 /**
- * classify.js — 1000-class ImageNet recognition + 1280-d embeddings + few-shot.
+ * classify.js — 1000-class ImageNet recognition.
  *
  * The detector answers "there is a blob of class X". This module answers "and
- * what exactly is that blob", three different ways:
- *
- *   1. TAXONOMY. EfficientNet-Lite4 (INT8, 12.9 MB) classifies the crop over
- *      1000 ImageNet classes — the vocabulary that contains "espresso maker",
- *      "power drill", "hard disc", "iPod" and "plug", none of which COCO has.
- *
- *   2. EMBEDDING. The same graph exposes its 1280-d pooled features, so every
- *      crop gets a compact appearance fingerprint at no extra inference cost.
- *      Fingerprints power the similarity search ("show me more like this") and
- *      the tracker's appearance check.
- *
- *   3. FEW-SHOT LEARNING. Fingerprints are also the mechanism behind TEACH: the
- *      user names an object once, its fingerprint is stored, and every later
- *      frame matches against the store by cosine similarity. That is how the
- *      assistant can honestly learn "plug socket" — a class no public detector
- *      ships with — in one tap, and how it recognises objects specific to one
- *      person's life: their keys, their mug, their inhaler.
+ * what exactly is that blob": EfficientNet-Lite4 (INT8, 12.9 MB) classifies
+ * the crop over 1000 ImageNet classes — the vocabulary that contains
+ * "espresso maker", "power drill", "hard disc", "iPod" and "plug", none of
+ * which COCO has. `refineFromClassifier()` then combines the two votes into
+ * one honest answer.
  */
 
-import { l2normalise, cosine, toTensor } from './core.js';
+import { l2normalise, toTensor } from './core.js';
 import { IMAGENET_KB, IMAGENET_NOISE, displayName, lookup, categoryOf } from './kb.js';
 
 const MODEL_URL = 'models/imagenet-lite4.onnx';
@@ -110,18 +98,6 @@ export class Classifier {
     };
   }
 
-  /** Match a crop against taught examples. Returns best hit or null. */
-  static matchTaught(embedding, store, { minScore = 0.62 } = {}) {
-    if (!embedding || !store?.examples?.length) return null;
-    let best = null;
-    for (const ex of store.examples) {
-      const score = cosine(embedding, ex.embedding);
-      if (!best || score > best.score) best = { ...ex, score };
-    }
-    if (!best || best.score < minScore) return null;
-    return best;
-  }
-
   _square(crop) {
     const size = Math.max(crop.width, crop.height);
     if (!this._canvas) this._canvas = document.createElement('canvas');
@@ -144,65 +120,6 @@ export class Classifier {
 
   info() {
     return { ...CLASSIFIER_INFO, loaded: this.ready, calls: this.calls, lastMs: this.lastMs };
-  }
-}
-
-/**
- * Teachable similarity store. Kept deliberately small and in-memory here; the
- * persistence layer (memory.js) serialises it to localStorage/IndexedDB.
- */
-export class TeachStore {
-  constructor({ limit = 400 } = {}) {
-    this.examples = [];
-    this.limit = limit;
-    this.version = 1;
-  }
-
-  add({ label, embedding, category = null, tags = [], note = '', crop = null, box = null }) {
-    if (!embedding) return null;
-    const existing = this.examples.filter((e) => e.label === label);
-    const entry = {
-      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
-      label,
-      category: category || categoryOf(label),
-      tags,
-      note,
-      embedding: Array.from(embedding),
-      thumb: crop || null,
-      samples: existing.length + 1,
-      created: Date.now()
-    };
-    this.examples.push(entry);
-    if (this.examples.length > this.limit) this.examples.splice(0, this.examples.length - this.limit);
-    return entry;
-  }
-
-  /** Rebuild Float32 views after a JSON round-trip. */
-  hydrate() {
-    for (const e of this.examples) if (!(e.embedding instanceof Float32Array)) e.embedding = Float32Array.from(e.embedding);
-    return this;
-  }
-
-  forget(label) {
-    const before = this.examples.length;
-    this.examples = this.examples.filter((e) => e.label !== label);
-    return before - this.examples.length;
-  }
-
-  labels() {
-    const counts = new Map();
-    for (const e of this.examples) counts.set(e.label, (counts.get(e.label) || 0) + 1);
-    return [...counts.entries()].map(([label, samples]) => ({ label, samples }));
-  }
-
-  toJSON() {
-    return { version: this.version, examples: this.examples };
-  }
-
-  static fromJSON(obj) {
-    const store = new TeachStore();
-    if (obj?.examples) store.examples = obj.examples.map((e) => ({ ...e, embedding: Float32Array.from(e.embedding || []) }));
-    return store;
   }
 }
 

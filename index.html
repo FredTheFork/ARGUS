@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
-<title>ARGUS — Adaptive Recognition &amp; Guidance Utility System</title>
-<meta name="description" content="ARGUS: an on-device visual agent. Point it at the world and the objects are outlined and named on the feed. Everything runs locally — nothing leaves the device.">
-<meta name="theme-color" content="#02060c">
+<title>ARGUS — Instant Object Recognition</title>
+<meta name="description" content="ARGUS: an on-device recognition camera. Point it at an object and it is outlined and named on the feed — instantly. Everything runs locally; nothing leaves the device.">
+<meta name="theme-color" content="#05070a">
 <meta name="color-scheme" content="dark">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -16,19 +16,12 @@
 <link rel="apple-touch-icon" href="icons/icon-180.png">
 <link rel="stylesheet" href="css/app.css">
 </head>
-<body data-hud="standard">
+<body>
 
 <!-- ══ boot ═══════════════════════════════════════════════════════ -->
 <div id="boot" class="boot">
   <div class="boot-card">
-    <div class="boot-arc">
-      <svg viewBox="0 0 120 120" aria-hidden="true">
-        <circle cx="60" cy="60" r="52" class="boot-ring"></circle>
-        <circle cx="60" cy="60" r="52" class="boot-ring-fg" id="boot-ring-fg"></circle>
-      </svg>
-      <div class="boot-mark">A</div>
-    </div>
-    <h1 class="boot-title">ARGUS</h1>
+    <h1 class="boot-word">ARGUS</h1>
     <p class="boot-sub" id="boot-stage">Initialising</p>
     <div class="boot-bar"><i id="boot-pct"></i></div>
     <div class="boot-lines" id="boot-lines"></div>
@@ -40,24 +33,25 @@
         <button id="demo-fallback" class="btn ghost" hidden>Run demo feed</button>
       </div>
     </div>
-    <p class="boot-ver"><span id="boot-ver">2.1.0</span> · <span id="build-id">vision-agent</span></p>
+    <p class="boot-ver"><span id="boot-ver">3.0.0</span> · instant on-device recognition</p>
   </div>
 </div>
 
 <!-- ══ stage ══════════════════════════════════════════════════════
-     Camera-only v2.1: the stage is the feed and the overlay drawn on it.
-     It deliberately carries ZERO interactive elements — no buttons, no
-     fields, no sheets. Point it at the world; objects are outlined and
-     named on the canvas. The only surface that can appear on its own is
-     the hazard alert (div#toasts). -->
+     The feed is the interface. Everything on it is drawn, nothing on
+     it can be pressed. The only DOM besides the video and the overlay
+     canvas is the two-line status readout (pointer-events: none). -->
 <main id="stage" class="stage" hidden>
   <video id="cam" playsinline muted autoplay></video>
   <canvas id="hud"></canvas>
-  <div class="toasts" id="toasts"></div>
+  <div class="status" aria-hidden="true">
+    <span class="status-left"><span class="status-dot"></span><span class="status-brand">ARGUS</span><span id="status-left">recognising</span></span>
+    <span class="status-right" id="status-right">on-device · nothing leaves this phone</span>
+  </div>
 </main>
 
 <noscript>
-  <div style="position:fixed;inset:0;z-index:99;display:grid;place-items:center;background:#02060c;color:#dff6ff;font-family:system-ui,sans-serif">
+  <div style="position:fixed;inset:0;z-index:99;display:grid;place-items:center;background:#05070a;color:#eef2f6;font-family:system-ui,sans-serif">
     <p style="max-width:34ch;text-align:center;line-height:1.6">ARGUS needs JavaScript — every model runs locally, on this device, in your browser.</p>
   </div>
 </noscript>
@@ -66,7 +60,7 @@
 /* ══ boot watchdog — deliberately OUTSIDE the module graph ════════════════
  *
  * Everything else in this app is an ES module. If the module graph fails to
- * load — one 404 out of 25 files, a proxy that answers a .js request with an
+ * load — one 404 out of 20 files, a proxy that answers a .js request with an
  * HTML error page, a browser too old for module syntax — app.js never runs,
  * nothing ever un-sticks the boot card, and the user stares at "Initialising"
  * forever. This tiny classic script is the last line of defence:
@@ -114,7 +108,7 @@
     if (detail) detail.textContent = message;
     if (box) box.hidden = false;
     var demo = $('demo-fallback');
-    if (demo) demo.hidden = false;   // wired by app.js when the app is alive
+    if (demo) demo.hidden = false;
   }
 
   setInterval(function () {

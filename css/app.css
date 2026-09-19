@@ -1,115 +1,224 @@
-/**
- * app.css — ARGUS v2.1 interface.
- *
- * A camera feed and an overlay, nothing else: the stage carries no controls,
- * so the only rules left are the boot card (startup honesty, retry), the feed
- * and its HUD canvas, and the hazard toast. Contrast comes from hard shadows
- * and thin bright lines rather than from background fills, because everything
- * sits on top of moving imagery.
- */
+/* ════════════════════════════════════════════════════════════════════
+   ARGUS — one quiet, instrument-grade dark surface.
+   The camera feed is the interface; everything here is either the boot
+   card or two lines of 10 px status text.
+   ════════════════════════════════════════════════════════════════════ */
 
 :root {
-  --accent: #4ce0ff;
-  --accent-dim: #1b6f8c;
-  --accent-glow: rgba(76, 224, 255, .35);
-  --bg-0: #02060c;
-  --bg-1: #061420;
-  --bg-2: rgba(6, 20, 32, .72);
-  --ink: #dff6ff;
-  --line: rgba(76, 224, 255, .22);
-  --danger: #ff5b5b;
-  --warn: #ffb347;
-  --ok: #6dff9b;
-  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+  --bg: #05070a;
+  --ink: #eef2f6;
+  --ink-60: rgba(238, 242, 246, 0.6);
+  --ink-40: rgba(238, 242, 246, 0.4);
+  --ink-26: rgba(238, 242, 246, 0.26);
+  --line: rgba(238, 242, 246, 0.14);
+  --ok: #3ddc84;
 }
 
-* { box-sizing: border-box; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+[hidden] { display: none !important; }
 
 html, body {
-  margin: 0;
-  padding: 0;
   height: 100%;
-  background: var(--bg-0);
+  overflow: hidden;
+  background: var(--bg);
   color: var(--ink);
-  font-family: var(--sans);
-  overscroll-behavior: none;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
   -webkit-tap-highlight-color: transparent;
 }
 
-body { overflow: hidden; }
+/* ══ stage ══════════════════════════════════════════════════════ */
 
-/* The hidden attribute must always win. Fixed overlays here (the boot screen,
-   the stage) set `display` explicitly, which otherwise beats the UA
-   `[hidden] { display: none }` rule — leaving a dismissed overlay visible, or
-   worse, invisible-but-present and swallowing every touch on mobile. */
-[hidden] { display: none !important; }
+.stage {
+  position: fixed;
+  inset: 0;
+  background: #000;
+}
 
-.hint { color: color-mix(in srgb, var(--ink) 62%, transparent); font-size: 12px; line-height: 1.5; margin: 6px 0 14px; }
+#cam {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #000;
+}
 
-/* ── boot ─────────────────────────────────────────────────────── */
+body[data-mirror="1"] #cam {
+  transform: scaleX(-1);
+}
+
+#hud {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* Two quiet lines of chrome — the only DOM on the stage. */
+.status {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: calc(env(safe-area-inset-top, 0px) + 12px) calc(env(safe-area-inset-right, 0px) + 14px)
+           calc(env(safe-area-inset-bottom, 0px) + 12px) calc(env(safe-area-inset-left, 0px) + 14px);
+}
+
+.status-left {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--ink-60);
+}
+
+.status-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ok);
+  flex: none;
+}
+
+.status-brand {
+  font-weight: 700;
+  letter-spacing: 0.3em;
+  color: var(--ink-40);
+}
+
+#status-left {
+  color: var(--ink-40);
+}
+
+.status-right {
+  align-self: flex-end;
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  color: var(--ink-26);
+}
+
+/* ══ boot ════════════════════════════════════════════════════════ */
 
 .boot {
-  position: fixed; inset: 0; z-index: 50;
-  display: grid; place-items: center;
-  background:
-    radial-gradient(1200px 700px at 50% -10%, rgba(76, 224, 255, .08), transparent 60%),
-    var(--bg-0);
-  transition: opacity .35s ease;
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
 }
-.boot-card { width: min(92vw, 420px); text-align: center; padding: 24px; }
-.boot-arc { position: relative; width: 120px; height: 120px; margin: 0 auto 18px; }
-.boot-arc svg { width: 100%; height: 100%; transform: rotate(-90deg); }
-.boot-ring { fill: none; stroke: var(--line); stroke-width: 4; }
-.boot-ring-fg {
-  fill: none; stroke: var(--accent); stroke-width: 4; stroke-linecap: round;
-  stroke-dasharray: 327; stroke-dashoffset: 327; transition: stroke-dashoffset .3s ease;
-}
-.boot-mark {
-  position: absolute; inset: 0; display: grid; place-items: center;
-  font: 500 30px/1 var(--sans); letter-spacing: 0; color: var(--accent);
-  text-shadow: 0 0 18px var(--accent-glow);
-}
-.boot-title { margin: 0; font: 500 26px/1 var(--sans); letter-spacing: .34em; text-indent: .34em; }
-.boot-sub { margin: 8px 0 14px; font: 400 12px/1.4 var(--mono); color: color-mix(in srgb, var(--ink) 70%, transparent); }
-.boot-bar { height: 2px; background: var(--line); border-radius: 2px; overflow: hidden; }
-.boot-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
-.boot-lines { margin-top: 14px; text-align: left; font: 400 11px/1.6 var(--mono); color: color-mix(in srgb, var(--ink) 66%, transparent); max-height: 130px; overflow: hidden; }
-.boot-lines div::before { content: '› '; color: var(--accent-dim); }
-.boot-ver { margin: 16px 0 0; font: 400 10px/1 var(--mono); letter-spacing: .18em; color: color-mix(in srgb, var(--ink) 40%, transparent); }
-.boot-error { margin-top: 18px; padding: 14px; border: 1px solid color-mix(in srgb, var(--danger) 50%, transparent); border-radius: 12px; background: color-mix(in srgb, var(--danger) 12%, transparent); text-align: left; }
-.boot-error h2 { margin: 0 0 6px; font-size: 14px; color: var(--danger); }
-.boot-error p { margin: 0 0 10px; font: 400 11px/1.5 var(--mono); word-break: break-word; }
 
-.row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.boot-card {
+  width: min(320px, 82vw);
+  text-align: center;
+}
+
+.boot-word {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.42em;
+  text-indent: 0.42em;
+  color: var(--ink);
+}
+
+.boot-sub {
+  margin: 12px 0 16px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  color: var(--ink-60);
+  min-height: 15px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.boot-bar {
+  height: 2px;
+  border-radius: 1px;
+  background: rgba(238, 242, 246, 0.1);
+  overflow: hidden;
+}
+
+.boot-bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--ink);
+  border-radius: 1px;
+  transition: width 0.25s ease;
+}
+
+.boot-lines {
+  margin-top: 16px;
+  height: 76px;
+  overflow: hidden;
+  text-align: left;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--ink-40);
+  font-variant-numeric: tabular-nums;
+}
+
+.boot-lines .ok { color: var(--ok); }
+
+.boot-error {
+  margin-top: 18px;
+  text-align: center;
+}
+
+.boot-error h2 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.boot-error p {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ink-60);
+}
+
+.boot-error .row {
+  margin-top: 14px;
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}
+
 .btn {
-  padding: 9px 15px; border-radius: 10px; border: 1px solid var(--accent);
-  background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--ink);
-  font: 500 12px/1 var(--sans); cursor: pointer; text-decoration: none; display: inline-block;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  padding: 8px 16px;
+  border-radius: 6px;
+  border: 0;
+  cursor: pointer;
+  background: var(--ink);
+  color: #0a0c0f;
 }
-.btn.ghost { border-color: var(--line); background: transparent; }
 
-/* ── stage ────────────────────────────────────────────────────── */
-
-.stage { position: fixed; inset: 0; }
-#cam { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; background: #000; }
-#hud { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-body[data-mirror="1"] #cam { transform: scaleX(-1); }
-
-/* ── hazard toasts — the only proactive surface ───────────────── */
-
-.toasts { position: absolute; left: 10px; right: 10px; top: 50%; display: flex; flex-direction: column; gap: 6px; align-items: center; pointer-events: none; }
-.toast {
-  padding: 8px 13px; border-radius: 10px; background: rgba(0, 0, 0, .7);
-  border: 1px solid var(--line); font: 400 12px/1.3 var(--sans); max-width: 80vw;
-  animation: toast-in .22s ease;
+.btn.ghost {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink);
 }
-.toast.warn { border-color: color-mix(in srgb, var(--warn) 60%, transparent); color: var(--warn); }
-.toast.alert { border-color: color-mix(in srgb, var(--danger) 60%, transparent); color: var(--danger); font-weight: 600; }
-.toast.good { border-color: color-mix(in srgb, var(--ok) 60%, transparent); color: var(--ok); }
-@keyframes toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
-@media (prefers-reduced-motion: reduce) {
-  .boot { transition: none; }
-  .toast { animation: none; }
+.btn:active { transform: scale(0.98); }
+
+.boot-ver {
+  margin-top: 22px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--ink-26);
 }

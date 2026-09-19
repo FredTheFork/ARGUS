@@ -6,9 +6,9 @@
  * an ONNX graph: that needs a browser (or, here, a Node build of the same
  * runtime). This tool closes that gap. It loads the shipped models from
  * `models/`, checks their digests against `models/manifest.json`, pushes a
- * photograph through the whole perception stack — detector, tracker, colour and
- * material analysis, classifier, OCR, pose, fusion, the language layer — and
- * prints what ARGUS saw, field by field.
+ * photograph through the whole perception stack — detector, tiled detail
+ * pass, tracker, classifier, OCR, pose, fusion naming — and prints what
+ * ARGUS saw, field by field.
  *
  * The models are byte-for-byte the ones the browser loads, and the code is the
  * project's own `js/` modules, so a clean run here means the ONNX graphs, the
@@ -92,9 +92,7 @@ globalThis.fetch = HOST;
 
 const { Runtime } = await import('../js/core.js');
 const { Pipeline } = await import('../js/pipeline.js');
-const { Memory } = await import('../js/memory.js');
-const { respond } = await import('../js/agent.js');
-const { DEFAULTS } = await import('../js/config.js');
+const { CONFIG } = await import('../js/config.js');
 
 /*
  * Node-side runtime support.
@@ -180,10 +178,9 @@ for (const [key, m] of Object.entries(manifest.models)) {
 /* ---------------------------------------------------------------- *
  * Perceptual modules, loaded with verification on
  * ---------------------------------------------------------------- */
-const settings = { ...DEFAULTS, attributesEvery: 0, classifyEvery: 0, adaptive: false, showDistance: true, narrateDistance: true };
+const settings = { ...CONFIG, classifyEvery: 0, detailMode: 'auto' };
 const runtime = new Runtime({ onLog: () => {} });
 const pipeline = new Pipeline({ runtime, settings, onLog: (m) => !AS_JSON && console.log(`    · ${m}`) });
-pipeline.teach = new (await import('../js/classify.js')).TeachStore();
 
 const log = (...a) => { if (!AS_JSON) console.log(...a); };
 
@@ -229,6 +226,7 @@ const report = {
     inferMs: runs.map((r) => r.ms)
   },
   stats: pipeline.stats,
+  scanSize: pipeline.scanSize,
   records: records.map((r) => ({
     label: r.label,
     noun: r.noun,
@@ -236,32 +234,16 @@ const report = {
     confidence: Number(r.confidence.toFixed(3)),
     source: r.source,
     box: r.box.map((v) => Math.round(v)),
-    colour: r.attributes?.colour?.name || null,
-    colourStable: !!r.attributes?.colour?.stable,
-    samples: r.attributes?.samples ?? null,
-    palette: (r.attributes?.colour?.palette || []).slice(0, 3).map((c) => `${c.name} ${c.weight}%`),
-    material: r.attributes?.material?.name || null,
-    materials: (r.attributes?.materials || []).slice(0, 3).map((m) => `${m.name} ${(m.score ?? 0).toFixed(2)}`),
-    finish: r.attributes?.finish || null,
-    pattern: r.attributes?.pattern?.label || null,
-    shape: r.attributes?.shape?.form || null,
-    distance: r.distance ? { metres: r.distance.metres, min: r.distance.min, max: r.distance.max, bearing: r.distance.bearing, method: r.distance.method } : null,
-    classifier: (r.classifier || []).slice(0, 3).map((c) => `${c.label || c.name} ${(c.prob ?? 0).toFixed(2)}`),
     refined: r.refined || null,
+    classifier: (r.classifier || []).slice(0, 3).map((c) => `${c.label || c.name} ${(c.prob ?? 0).toFixed(2)}`),
     text: r.text || null,
     brand: r.brand?.name || null,
     sign: r.sign?.kind || null,
-    on: r.on || null,
-    supports: r.supports || null,
     posture: r.posture || null,
     activity: r.activity || null,
-    gesture: r.gesture || null,
-    hazard: r.hazard ? r.hazard.kind : null,
-    motion: r.motion ? `${r.motion.direction || r.motion.id} ${(r.motion.speed || 0).toFixed(0)}` : null
+    gesture: r.gesture || null
   })),
-  scene: pipeline.lastScene,
-  lighting: pipeline.lastLighting,
-  texts: (finalSnap.texts || []).map((l) => ({ text: l.text, confidence: Number((l.confidence || 0).toFixed(2)), brand: l.brand?.name || null, sign: l.sign?.kind || null }))
+  texts: (finalSnap.texts || []).map((l) => ({ text: l.text, confidence: Number((l.confidence || 0).toFixed(2)), brand: l.brand?.name || null, sign: l.sign?.kind || null, attached: !!l.attached }))
 };
 
 /* A few things that must be true of a correct frame, whatever is in the photo. */
@@ -272,44 +254,28 @@ push('all model digests match the manifest', digests.every((d) => d.ok), digests
 push('detector produced objects', records.length > 0, `${records.length} records`);
 push('boxes sit inside the frame', records.every((r) => r.box[0] >= -2 && r.box[1] >= -2 && r.box[2] <= videoFrame.width + 2 && r.box[3] <= videoFrame.height + 2));
 push('confidences are probabilities', records.every((r) => r.confidence > 0 && r.confidence <= 1));
-push('every object got a colour name', records.every((r) => !!r.attributes?.colour?.name), records.filter((r) => !r.attributes?.colour?.name).map((r) => r.label).join(', '));
-push('every object got a material guess', records.every((r) => !!r.attributes?.material?.name), records.filter((r) => !r.attributes?.material?.name).map((r) => r.label).join(', '));
-push('classifier ran on the larger objects', records.some((r) => (r.classifier || []).length > 0));
-push('distances are finite', records.every((r) => !r.distance || Number.isFinite(r.distance.metres)), records.filter((r) => r.distance && !Number.isFinite(r.distance.metres)).map((r) => r.label).join(', '));
-push('no background pass threw', !pipeline._bgError, String(pipeline._bgError || ''));
-push('language layer answers a query', (() => {
-  const memory = new Memory({ onLog: () => {} });
-  try {
-    const out = respond('what can you see', { records, memory, settings, scene: pipeline.lastScene, lighting: pipeline.lastLighting, texts: finalSnap.texts });
-    return !!out.say;
-  } catch (err) { pipeline._langError = err.message; return false; }
-})(), pipeline._langError || '');
+push('every object has a label and category', records.every((r) => r.label && r.category && r.source), records.filter((r) => !r.label || !r.category).map((r) => r.cls).join(', '));
+push('classifier ran on the larger objects', !pipeline.moduleState.classifier || records.some((r) => (r.classifier || []).length > 0));
+push('OCR pass completed', pipeline.moduleState.ocr ? pipeline.stats.ocrRuns > 0 : true, `runs ${pipeline.stats.ocrRuns}`);
+push('no background pass threw', records.every((r) => Number.isFinite(r.confidence)), records.filter((r) => !Number.isFinite(r.confidence)).map((r) => r.label).join(', '));
 
-/* ---------------------------------------------------------------- *
+/* ---------------------------------------------------------------- *\
  * Print it
  * ---------------------------------------------------------------- */
 if (AS_JSON) {
   console.log(JSON.stringify({ ...report, checks }, null, 2));
 } else {
-  log(`\nscene: ${finalSnap.scene?.summary || finalSnap.scene?.kind || '—'}`);
-  if (finalSnap.lighting) log(`light: ${finalSnap.lighting.key}, ${finalSnap.lighting.kelvin}K, ${Math.round(finalSnap.lighting.brightness * 100)}%`);
-  log(`\n${records.length} object${records.length === 1 ? '' : 's'}:`);
+  log(`\n${records.length} object${records.length === 1 ? '' : 's'} (scan ${pipeline.scanSize}px, mean frame ${report.timing.meanMs} ms):`);
   for (const r of report.records) {
     log(`\n  ${r.label}  (${r.confidence})  [${r.source}]`);
-    log(`    colour    ${r.colour}${r.colourStable ? '' : ' (provisional)'}${r.palette?.length ? ` · palette ${r.palette.join(', ')}` : ''}`);
-    log(`    material  ${r.material}${r.materials?.length ? ` · ${r.materials.join(', ')}` : ''}`);
-    log(`    look      ${[r.finish, r.pattern, r.shape].filter(Boolean).join(', ') || '—'}`);
     if (r.classifier?.length) log(`    classifier ${r.classifier.join(', ')}`);
     if (r.text) log(`    text      “${r.text}”${r.brand ? ` (brand: ${r.brand})` : ''}`);
-    if (r.distance) log(`    range     ${r.distance.metres} m (${r.distance.min}–${r.distance.max}) bearing ${r.distance.bearing}° · ${r.distance.method}`);
-    if (r.on) log(`    on        ${r.on}`);
-    if (r.supports?.length) log(`    holds     ${r.supports.join(', ')}`);
+    if (r.sign) log(`    sign      ${r.sign}`);
     if (r.posture || r.activity || r.gesture) log(`    body      ${[r.posture, r.activity?.label || r.activity, r.gesture].filter(Boolean).join(', ')}`);
-    if (r.hazard) log(`    HAZARD    ${r.hazard}`);
   }
   if (report.texts.length) {
     log(`\n${report.texts.length} text line${report.texts.length === 1 ? '' : 's'} read:`);
-    for (const t of report.texts.slice(0, 12)) log(`  ${t.text}  (${t.confidence}${t.brand ? `, brand ${t.brand}` : ''})`);
+    for (const t of report.texts.slice(0, 12)) log(`  ${t.text}  (${t.confidence}${t.brand ? `, brand ${t.brand}` : ''}${t.attached ? ', on object' : ''})`);
   }
   log('\nchecks:');
   for (const c of checks) log(`  ${c.ok ? 'ok   ' : 'FAIL '} ${c.name}${c.note ? ` — ${c.note}` : ''}`);

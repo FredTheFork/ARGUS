@@ -193,7 +193,7 @@ await fireSW('install', install);
 const cacheNames = await caches.api.keys();
 test('install pre-caches the shell', cacheNames.includes(`argus-${SW_V}-core`));
 const coreStore = caches.stores.get(`argus-${SW_V}-core`) || new Map();
-test(`shell holds the app files (${coreStore.size})`, coreStore.size >= 30, [...coreStore.keys()].slice(0, 3).join(', '));
+test(`shell holds the app files (${coreStore.size})`, coreStore.size >= 24, [...coreStore.keys()].slice(0, 3).join(', '));
 test('install does NOT pre-fetch the 47 MB of models (background fill owns those)',
   !cacheNames.includes(`argus-${SW_V}-models`) && !cacheNames.includes(`argus-${SW_V}-runtime`));
 test('install completes without warnings', swWarnings.length === 0, swWarnings.join('; '));

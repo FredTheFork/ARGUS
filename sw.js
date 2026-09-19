@@ -29,7 +29,7 @@
  *      (message type 'argus-purge') once the runtime has proved it unusable.
  */
 
-const VERSION = 'argus-2.1.0';   // bump to force a full re-cache on the next launch
+const VERSION = 'argus-3.0.0';   // bump to force a full re-cache on the next launch
 const CORE = `${VERSION}-core`;
 const RUNTIME = `${VERSION}-runtime`;
 const MODELS = `${VERSION}-models`;
@@ -47,20 +47,13 @@ const CORE_ASSETS = [
   './js/classify.js',
   './js/ocr.js',
   './js/pose.js',
-  './js/attributes.js',
   './js/tracker.js',
   './js/pipeline.js',
-  './js/memory.js',
-  './js/agent.js',
-  './js/install.js',
-  './js/speech.js',
   './js/ui.js',
   './js/data/imagenet.js',
   './js/data/ocrchars.js',
   './js/data/kb-objects.js',
   './js/data/kb-objects2.js',
-  './js/data/kb-materials.js',
-  './js/data/kb-colours.js',
   './js/data/kb-brands.js',
   // Bundled sample feed, so ?demo=1 also works with no network at all.
   './tools/sample-bus.jpg',

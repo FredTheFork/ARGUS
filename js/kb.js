@@ -4,31 +4,27 @@
  * This is where a raw model output becomes a specific thing. Three mechanisms
  * do the work:
  *
- *   1. TAXONOMY. ~800 curated objects (kb-objects*.js) plus the ImageNet-1k
- *      label set are merged into one vocabulary. Each entry carries category,
- *      material priors, colour priors, a real-world size, an interest tier and
- *      safety tags, so the same lookup answers "what is it", "how far is it",
- *      "is it worth speaking about" and "does it matter that I saw it".
+ *   1. TAXONOMY. ~928 curated objects (kb-objects*.js) plus the ImageNet-1k
+ *      label set are merged into one vocabulary. Each entry carries a category
+ *      (which drives the overlay's dot colour) and an interest tier.
  *
- *   2. ALIASES + FUZZ. Users say "socket", ImageNet says "switch", the detector
- *      says "cell phone" — all of those resolve to one record. Matching is
- *      case-folded, punctuation-stripped and tolerant of plurals and one edit.
+ *   2. ALIASES + FUZZ. The detector says "cell phone", ImageNet says
+ *      "cellular telephone", a label says "iphone" — all of those resolve to
+ *      one record. Matching is case-folded, punctuation-stripped and tolerant
+ *      of plurals and one edit.
  *
  *   3. NAMING. `nameFor()` composes the most specific honest label available:
  *      detected class, refined by classifier evidence, qualified by brand text
- *      read off the object, described by colour and material. It is the
- *      difference between "phone" and "matte black Apple iPhone".
+ *      read off the object. It is the difference between "phone" and
+ *      "Samsung phone".
  */
 
 import { OBJECTS_1 } from './data/kb-objects.js';
 import { OBJECTS_2 } from './data/kb-objects2.js';
-import { MATERIALS, FINISHES, CONDITIONS } from './data/kb-materials.js';
-import { COLOURS, HUE_FAMILIES, LIGHT_TEMPERATURES } from './data/kb-colours.js';
 import { BRANDS, SIGN_LEXICON } from './data/kb-brands.js';
 import { IMAGENET_LABELS } from './data/imagenet.js';
-import { rgbToLab, deltaE } from './core.js';
 
-/* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *\
  * Parsing
  * ------------------------------------------------------------------ */
 
@@ -59,7 +55,7 @@ function parseRows(block) {
 
 export const OBJECTS = [...parseRows(OBJECTS_1), ...parseRows(OBJECTS_2)];
 
-/* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *\
  * ImageNet refinement
  *
  * EfficientNet-Lite4 answers in ImageNet vocabulary, which is broader than
@@ -124,7 +120,7 @@ export const IMAGENET_REFINE = {
   'moped': 'scooter', 'mountain bike': 'bicycle', 'tricycle': 'bicycle',
   'motor scooter': 'scooter', 'forklift': 'forklift', 'crane': 'crane',
   'bulldozer': 'bulldozer', 'tractor': 'tractor', 'harvester': 'tractor',
-  'golf cart': 'vehicle', 'ambulance': 'ambulance',
+  'golf cart': 'vehicle',
   'backpack': 'backpack', 'rucksack': 'backpack', 'purse': 'wallet', 'wallet': 'wallet',
   'umbrella': 'umbrella', 'suitcase': 'suitcase', 'briefcase': 'briefcase',
   'mailbag': 'bag', 'plastic bag': 'plastic bag', 'shopping bag': 'bag',
@@ -138,7 +134,7 @@ export const IMAGENET_REFINE = {
   'wool': 'wool', 'velvet': 'velvet', 'denim': 'denim', 'leather': 'leather',
   'Christmas stocking': 'socks', 'brassiere': 'clothing', 'maillot': 'swimwear',
   'sombrero': 'hat', 'cowboy hat': 'hat', 'bonnet': 'hat', 'mortarboard': 'hat',
-  'bearskin': 'hat', 'shower cap': 'hair clip', 'wig': 'hair', 'hairpiece': 'hair',
+  'bearskin': 'hat', 'wig': 'hair', 'hairpiece': 'hair',
   'necklace': 'necklace', 'earring': 'earring', 'bracelet': 'bracelet',
   'ring': 'ring', 'watch': 'watch', 'chain saw': 'chainsaw',
   'screwdriver': 'screwdriver', 'hammer': 'hammer', 'hatchet': 'axe', 'cleaver': 'cleaver',
@@ -164,7 +160,6 @@ export const IMAGENET_REFINE = {
   'ice cream': 'ice cream', 'ice lolly': 'ice cream', 'dough': 'food',
   'chocolate sauce': 'chocolate', 'meat loaf': 'meat', 'carbonara': 'pasta',
   'eggnog': 'drink', 'espresso': 'coffee', 'cup of coffee': 'coffee', 'red wine': 'wine',
-  'beer bottle': 'bottle', 'beer glass': 'pint glass',
   'tabby': 'cat', 'tiger cat': 'cat', 'Persian cat': 'cat', 'Siamese cat': 'cat',
   'Egyptian cat': 'cat', 'kitten': 'kitten', 'dog': 'dog', 'golden retriever': 'dog',
   'Labrador retriever': 'dog', 'German shepherd': 'dog', 'border collie': 'dog',
@@ -178,9 +173,9 @@ export const IMAGENET_REFINE = {
   'brown bear': 'animal', 'polar bear': 'animal', 'fox': 'fox', 'wolf': 'animal',
   'rabbit': 'rabbit', 'hare': 'rabbit', 'squirrel': 'squirrel', 'mouse': 'mouse',
   'rat': 'rat', 'hamster': 'hamster', 'guinea pig': 'hamster', 'porcupine': 'animal',
-  'kangaroo': 'animal', 'koala': 'animal', 'panda': 'animal', 'sloth': 'animal',
-  'otter': 'animal', 'skunk': 'animal', 'badger': 'animal', 'weasel': 'animal',
-  'mongoose': 'animal', 'meerkat': 'animal', 'lynx': 'animal',
+  'kangaroo': 'kangaroo', 'koala': 'koala', 'panda': 'panda', 'sloth': 'sloth',
+  'otter': 'otter', 'skunk': 'skunk', 'badger': 'badger', 'weasel': 'weasel',
+  'mongoose': 'mongoose', 'meerkat': 'meerkat', 'lynx': 'lynx',
   'robin': 'bird', 'jay': 'bird', 'magpie': 'bird', 'chickadee': 'bird',
   'kite bird': 'bird', 'bald eagle': 'bird', 'vulture': 'bird', 'ostrich': 'bird',
   'peacock': 'bird', 'parrot': 'bird', 'macaw': 'bird', 'cockatoo': 'bird',
@@ -199,54 +194,38 @@ export const IMAGENET_REFINE = {
   'daisy': 'flower', 'rose': 'flower', 'sunflower': 'flower', 'tulip': 'flower',
   'orchid': 'flower', 'poppy': 'flower', 'dandelion': 'flower', 'pot': 'plant pot',
   'houseplant': 'houseplant', 'potted plant': 'houseplant', 'tree': 'tree',
-  'oak': 'tree', 'palm': 'tree', 'pine': 'tree', 'mushroom': 'mushroom',
-  'yellow lady\'s slipper': 'flower', 'rapeseed': 'plant', 'corn': 'sweetcorn',
+  'oak': 'tree', 'palm': 'tree', 'pine': 'tree',
+  'yellow lady\'s slipper': 'flower', 'rapeseed': 'plant',
   'buckeye': 'seed', 'acorn': 'seed', 'hip': 'fruit',
   'bookcase': 'bookcase', 'bookshelf': 'bookcase', 'bookshop': 'shop front',
-  'comic book': 'book', 'book jacket': 'book', 'menu': 'menu', 'binder': 'folder',
+  'comic book': 'book', 'book jacket': 'book', 'menu': 'menu',
   'crossword puzzle': 'puzzle', 'jigsaw puzzle': 'puzzle',
   'chiffonier': 'sideboard', 'china cabinet': 'cabinet', 'cabinet': 'cabinet',
-  'file cabinet': 'filing cabinet', 'filing cabinet': 'filing cabinet',
-  'dining table': 'table', 'desk': 'desk', 'pool table': 'table', 'table lamp': 'lamp',
+  'file cabinet': 'filing cabinet', 'dining table': 'table', 'desk': 'desk',
+  'pool table': 'table', 'table lamp': 'lamp',
   'rocking chair': 'chair', 'folding chair': 'chair', 'barber chair': 'chair',
   'throne': 'chair', 'studio couch': 'sofa', 'sofa': 'sofa', 'couch': 'sofa',
   'four-poster': 'bed', 'crib': 'cot', 'bassinet': 'cot', 'cradle': 'cot',
   'wardrobe': 'wardrobe', 'chest': 'chest of drawers', 'dresser': 'chest of drawers',
-  'medicine chest': 'cabinet', 'shelf': 'shelf', 'safe': 'safe', 'vase': 'vase',
-  'pot': 'plant pot', 'flowerpot': 'plant pot', 'lampshade': 'lampshade',
-  'mirror': 'mirror', 'window shade': 'window blind', 'curtain': 'curtain',
-  'carpet': 'carpet', 'doormat': 'door mat', 'prayer rug': 'rug', 'quilt': 'duvet',
-  'pillow': 'pillow', 'cushion': 'pillow', 'towel': 'towel', 'bath towel': 'towel',
-  'apron': 'apron', 'bib': 'apron', 'pinafore': 'apron',
+  'shelf': 'shelf', 'vase': 'vase', 'flowerpot': 'plant pot',
+  'mirror': 'mirror', 'curtain': 'curtain', 'carpet': 'carpet', 'prayer rug': 'rug',
+  'towel': 'towel', 'bib': 'apron', 'pinafore': 'apron',
   'typewriter keyboard': 'keyboard', 'cash register': 'cash register',
-  'computer keyboard': 'keyboard', 'mouse': 'mouse', 'mousepad': 'mouse mat',
-  'monitor': 'monitor', 'screen': 'monitor', 'television': 'television',
-  'projector': 'projector', 'loudspeaker': 'speaker', 'microphone': 'microphone',
-  'headphones': 'headphones', 'earphone': 'earbuds', 'radio': 'radio',
+  'mousepad': 'mouse mat', 'projector': 'projector', 'loudspeaker': 'speaker',
+  'microphone': 'microphone', 'headphones': 'headphones', 'earphone': 'earbuds',
   'camera': 'camera', 'reflex camera': 'camera', 'Polaroid camera': 'camera',
   'lens cap': 'camera lens', 'tripod': 'tripod', 'binoculars': 'binoculars',
-  'telescope': 'telescope', 'microscope': 'microscope', 'digital clock': 'clock',
+  'telescope': 'telescope', 'microscope': 'microscope',
   'oscilloscope': 'instrument', 'seismograph': 'instrument', 'theodolite': 'instrument',
-  'slide rule': 'calculator', 'calculator': 'calculator', 'abacus': 'calculator',
-  'photocopier': 'photocopier', 'printer': 'printer', 'scanner': 'scanner',
-  'hard disc': 'external hard drive', 'tape drive': 'hard drive', 'diskette': 'floppy disk',
-  'CD': 'cd', 'DVD': 'dvd', 'cassette': 'cassette', 'vinyl': 'vinyl record',
-  'iPod': 'phone', 'cellular telephone': 'phone', 'dial telephone': 'telephone',
-  'pay-phone': 'telephone', 'telephone bell': 'telephone', 'hand-held computer': 'tablet',
-  'notebook, notebook computer': 'laptop', 'laptop': 'laptop', 'desktop computer': 'desktop computer',
-  'modem': 'router', 'router': 'router', 'network switch': 'network switch',
-  'power drill': 'power drill', 'electric fan': 'electric fan',
-  'space heater': 'space heater', 'radiator': 'radiator', 'stove': 'hob',
-  'Dutch oven': 'oven', 'rotisserie': 'oven', 'microwave': 'microwave',
-  'toaster': 'toaster', 'waffle iron': 'toaster', 'espresso maker': 'espresso machine',
-  'coffeepot': 'coffee machine', 'teapot': 'teapot', 'kettle': 'kettle',
-  'water jug': 'jug', 'pitcher': 'jug', 'beer pitcher': 'jug', 'vase': 'vase',
-  'pot': 'plant pot', 'crock pot': 'slow cooker', 'frying pan': 'frying pan',
-  'wok': 'wok', 'caldron': 'saucepan', 'Dutch oven': 'oven',
+  'slide rule': 'calculator', 'calculator': 'calculator',
+  'tape drive': 'hard drive', 'diskette': 'floppy disk',
+  'CD': 'cd', 'DVD': 'dvd', 'vinyl': 'vinyl record',
+  'telephone bell': 'telephone', 'router': 'router', 'network switch': 'network switch',
+  'stove': 'hob', 'kettle': 'kettle', 'water jug': 'jug', 'pitcher': 'jug',
+  'beer pitcher': 'jug', 'crock pot': 'slow cooker',
   'seat belt': 'seatbelt', 'car wheel': 'car wheel', 'wheel': 'car wheel',
   'car mirror': 'mirror', 'grille': 'vent', 'radiator grille': 'vent',
-  'license plate': 'number plate', 'traffic light': 'traffic light',
-  'street sign': 'road sign', 'traffic sign': 'road sign', 'speed limit': 'road sign',
+  'license plate': 'number plate', 'traffic sign': 'road sign', 'speed limit': 'road sign',
   'pillar box': 'post box', 'post box': 'post box', 'mailbox': 'post box',
   'birdhouse': 'bird box', 'bird feeder': 'bird feeder', 'birdbath': 'bird bath',
   'patio': 'patio', 'gazebo': 'gazebo', 'greenhouse': 'greenhouse',
@@ -256,15 +235,15 @@ export const IMAGENET_REFINE = {
   'stone wall': 'wall', 'picket fence': 'fence', 'chainlink fence': 'fence',
   'chain-link fence': 'fence', 'fence': 'fence', 'dam': 'dam', 'viaduct': 'bridge',
   'steel arch bridge': 'bridge', 'suspension bridge': 'bridge', 'pier': 'pier',
-  'dock': 'dock', 'fountain': 'fountain', 'parking meter': 'parking meter',
-  'pay-phone': 'telephone', 'beacon': 'lighthouse', 'solar dish': 'satellite dish',
+  'dock': 'dock', 'fountain': 'fountain',
+  'beacon': 'lighthouse', 'solar dish': 'satellite dish',
   'radio telescope': 'satellite dish', 'parachute': 'parachute', 'airship': 'airship',
   'balloon': 'balloon', 'airliner': 'airplane', 'warplane': 'airplane',
   'space shuttle': 'airplane', 'catamaran': 'boat', 'trimaran': 'boat',
   'container ship': 'ship', 'liner': 'ship', 'yawl': 'boat', 'schooner': 'boat',
   'lifeboat': 'boat', 'gondola': 'boat', 'speedboat': 'boat', 'fireboat': 'boat',
   'aircraft carrier': 'ship', 'submarine': 'submarine', 'paddlewheel': 'boat',
-  'scoreboard': 'scoreboard', 'punching bag': 'punching bag', 'punching bag': 'punching bag',
+  'scoreboard': 'scoreboard', 'punching bag': 'punching bag',
   'barbell': 'barbell', 'dumbbell': 'dumbbell', 'yoga': 'yoga mat',
   'horizontal bar': 'gym equipment', 'parallel bars': 'gym equipment',
   'balance beam': 'gym equipment', 'treadmill': 'treadmill', 'rowing machine': 'gym equipment',
@@ -273,26 +252,21 @@ export const IMAGENET_REFINE = {
   'golf ball': 'golf ball', 'ping-pong ball': 'ball', 'tennis ball': 'tennis ball',
   'croquet ball': 'ball', 'rugby ball': 'rugby ball', 'baseball': 'baseball',
   'cricket ball': 'cricket ball', 'puck': 'puck', 'racket': 'tennis racket',
-  'tennis racket': 'tennis racket', 'badminton racket': 'badminton racket',
-  'baseball bat': 'baseball bat', 'cricket bat': 'cricket bat', 'hockey stick': 'hockey stick',
-  'golf club': 'golf club', 'skis': 'skis', 'ski': 'skis', 'snowboard': 'snowboard',
-  'surfboard': 'surfboard', 'paddle': 'paddle', 'canoe': 'canoe', 'kayak': 'kayak',
-  'parachute': 'parachute', 'trampoline': 'trampoline', 'swing': 'swing',
+  'badminton racket': 'badminton racket', 'hockey stick': 'hockey stick',
+  'golf club': 'golf club', 'ski': 'skis', 'paddle': 'paddle', 'canoe': 'canoe',
+  'kayak': 'kayak', 'trampoline': 'trampoline', 'swing': 'swing',
   'seesaw': 'seesaw', 'carousel': 'merry-go-round', 'Ferris wheel': 'ferris wheel',
   'swimming cap': 'swimming goggles', 'snorkel': 'swimming goggles',
-  'oxygen mask': 'oxygen mask', 'gas mask': 'face mask', 'breastplate': 'armour',
-  'shield': 'shield', 'helmet': 'hard hat', 'crash helmet': 'hard hat',
-  'football helmet': 'hard hat', 'bulletproof vest': 'body armour',
+  'breastplate': 'armour', 'shield': 'shield', 'helmet': 'hard hat',
+  'crash helmet': 'hard hat', 'football helmet': 'hard hat',
+  'bulletproof vest': 'body armour',
   'assault rifle': 'weapon', 'revolver': 'weapon', 'rifle': 'weapon', 'cannon': 'weapon',
   'bomb': 'hazard', 'missile': 'weapon', 'projectile': 'weapon', 'bow': 'weapon',
-  'crossbow': 'weapon', 'sword': 'blade', 'knife': 'knife', 'dagger': 'knife',
-  'cleaver': 'cleaver', 'axe': 'axe', 'hatchet': 'axe', 'sickle': 'sickle',
-  'scythe': 'scythe', 'lawn mower': 'lawn mower',
-  'pencil sharpener': 'sharpener', 'pencil box': 'pencil case', 'crayon': 'crayon',
-  'chalk': 'chalk', 'notebook': 'notebook', 'binder': 'folder',
-  'bath towel': 'towel', 'teddy': 'teddy bear', 'teddy bear': 'teddy bear',
-  'toyshop': 'toy shop', 'doll': 'doll', 'puppet': 'puppet', 'pinwheel': 'pinwheel',
-  'kite': 'kite', 'balloon': 'balloon', 'jigsaw puzzle': 'puzzle'
+  'crossbow': 'weapon', 'sword': 'blade', 'dagger': 'knife',
+  'axe': 'axe', 'sickle': 'sickle', 'scythe': 'scythe',
+  'chalk': 'chalk',
+  'teddy': 'teddy bear', 'doll': 'doll', 'puppet': 'puppet', 'pinwheel': 'pinwheel',
+  'kite': 'kite'
 };
 
 /** ImageNet classes whose crop-level answers are usually noise. */
@@ -308,12 +282,12 @@ export const IMAGENET_NOISE = new Set([
   'solar dish', 'traffic light', 'street sign', 'patio', 'gazebo', 'birdbath'
 ]);
 
-/* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *\
  * Category inference
  *
  * ImageNet labels arrive without any taxonomy of their own. Keywords get them
  * most of the way; the explicit table above catches the rest. Categories drive
- * HUD colour, the spoken register and the scene inference.
+ * the overlay's dot colour.
  * ------------------------------------------------------------------ */
 
 const CATEGORY_RULES = [
@@ -321,14 +295,14 @@ const CATEGORY_RULES = [
   [/(dog|cat|kitten|puppy|retriever|terrier|spaniel|shepherd|collie|husky|pug|chihuahua|dalmatian|poodle|malamute|pinscher|schnauzer|setter|hound|bull|ox|cow|sheep|ram|ewe|goat|ibex|horse|zebra|elephant|camel|giraffe|hippopotamus|rhinoceros|lion|tiger|leopard|cheetah|bear|fox|wolf|rabbit|hare|squirrel|mouse|rat|hamster|guinea pig|porcupine|kangaroo|koala|panda|sloth|otter|skunk|badger|weasel|mongoose|meerkat|lynx|bison|wombat|wallaby|platypus|armadillo|hippo|seal|sea lion|dolphin|whale|bird|robin|jay|magpie|chickadee|eagle|vulture|ostrich|peacock|parrot|macaw|cockatoo|hummingbird|toucan|duck|goose|swan|hen|cock|turkey|penguin|albatross|flamingo|heron|stork|pelican|kingfisher|woodpecker|finch|sparrow|wren|oriole|brambling|goldfinch|junco|bulbul|indigo bunting|kite|vulture|fish|goldfish|tench|barracouta|eel|stingray|shark|jellyfish|anemone|coral|snail|slug|spider|tarantula|scorpion|bee|ant|butterfly|dragonfly|grasshopper|cricket|beetle|ladybug|fly|mosquito|cockroach|mantis|stick insect|worm|lizard|iguana|chameleon|gecko|crocodile|alligator|turtle|snake|cobra|python|viper|frog|toad)/i, 'animal'],
   [/(flower|daisy|rose|sunflower|tulip|orchid|poppy|dandelion|rapeseed|pot|houseplant|potted plant|tree|oak|palm|pine|mushroom|buckeye|acorn|hip|lady's slipper|corn|broccoli|cauliflower|cabbage|cucumber|artichoke|pepper|squash|zucchini|vegetable|plant|leaf|moss|fern|ivy|vine|cactus|succulent|herb|seed|grain|hay|thatch|grass|shrub|hedge|bonzai)/i, 'plant'],
   [/(apple|banana|orange|lemon|strawberry|pineapple|pomegranate|fig|jackfruit|custard apple|Granny Smith|pretzel|bagel|French loaf|loaf|pizza|hotdog|cheeseburger|hamburger|ice cream|ice lolly|dough|chocolate|meat loaf|carbonara|eggnog|espresso|coffee|red wine|beer|plate|soup|consomme|trifle|guacamole|mashed potato|head cabbage|mushroom|corn|potato|carrot|onion|garlic|fruit|food|dish|tray|menu)/i, 'food'],
-  [/(car|taxi|cab|minibus|bus|trolleybus|truck|van|trailer|snowplow|moped|bicycle|bike|tricycle|motor|scooter|forklift|crane|bulldozer|tractor|harvester|limousine|convertible|jeep|pickup|ambulance|fire engine|police van|garbage truck|tow truck|racer|sports car|go-kart|golf cart|wheelchair|airliner|warplane|space shuttle|airship|balloon|catamaran|trimaran|container ship|liner|yawl|schooner|lifeboat|gondola|speedboat|fireboat|aircraft carrier|submarine|paddlewheel|steam locomotive|electric locomotive|bullet train|freight car|passenger car|tank|half track|trailer truck|moving van|horse cart|dog sled|paddlewheel)/i, 'vehicle'],
-  [/(keyboard|monitor|screen|television|laptop|notebook|computer|mouse|joystick|remote|webcam|printer|photocopier|scanner|modem|router|disc|diskette|cassette|iPod|phone|telephone|camera|lens|projector|microphone|loudspeaker|headphone|earphone|radio|amplifier|oscilloscope|theodolite|calculator|oscilloscope|dial telephone|pay-phone|hand-held computer|hard disc|tape drive|CD player|DVD player|tape player|digital clock|digital watch|slot machine|cash machine|vending machine|cash register|typewriter)/i, 'tech'],
-  [/(drill|saw|hammer|screwdriver|spanner|wrench|pliers|axe|hatchet|cleaver|knife|dagger|sword|sickle|scythe|chisel|plane|ladle|spatula|wok|pan|strainer|colander|corkscrew|can opener|peeler|grater|whisk|scissors|shears|file|nail|screw|bolt|chain|padlock|combination lock|scale|ruler|yardstick|level|trowel|ladder|tool|mower|shovel|rake|hoe|pitchfork|hoe|pick|skewer|crutch|broom|mop|bucket|dustpan|wheelbarrow|watering can|hose|plunger)/i, 'tool'],
+  [/(car|taxi|cab|minibus|bus|trolleybus|truck|van|trailer|snowplow|moped|bicycle|bike|tricycle|motor|scooter|forklift|crane|bulldozer|tractor|harvester|limousine|convertible|jeep|pickup|ambulance|fire engine|police van|garbage truck|tow truck|racer|sports car|go-kart|golf cart|wheelchair|airliner|warplane|space shuttle|airship|balloon|catamaran|trimaran|container ship|liner|yawl|schooner|lifeboat|gondola|speedboat|fireboat|aircraft carrier|submarine|paddlewheel|steam locomotive|electric locomotive|bullet train|freight car|passenger car|tank|half track|trailer truck|moving van|horse cart|dog sled)/i, 'vehicle'],
+  [/(keyboard|monitor|screen|television|laptop|notebook|computer|mouse|joystick|remote|webcam|printer|photocopier|scanner|modem|router|disc|diskette|cassette|iPod|phone|telephone|camera|lens|projector|microphone|loudspeaker|headphone|earphone|radio|amplifier|oscilloscope|theodolite|calculator|dial telephone|pay-phone|hand-held computer|hard disc|tape drive|CD player|DVD player|tape player|digital clock|digital watch|slot machine|cash machine|vending machine|cash register|typewriter)/i, 'tech'],
+  [/(drill|saw|hammer|screwdriver|spanner|wrench|pliers|axe|hatchet|cleaver|knife|dagger|sword|sickle|scythe|chisel|plane|ladle|spatula|wok|pan|strainer|colander|corkscrew|can opener|peeler|grater|whisk|scissors|shears|file|nail|screw|bolt|chain|padlock|combination lock|scale|ruler|yardstick|level|trowel|ladder|tool|mower|shovel|rake|hoe|pitchfork|pick|skewer|crutch|broom|mop|bucket|dustpan|wheelbarrow|watering can|hose|plunger)/i, 'tool'],
   [/(table|chair|sofa|couch|bed|crib|cot|wardrobe|dresser|chest|bookcase|bookshelf|cabinet|shelf|desk|bench|stool|throne|bassinet|cradle|rocking chair|folding chair|barber chair|studio couch|four-poster|pool table|dining table|sideboard|chiffonier|china cabinet|file cabinet|filing cabinet|lamp|lampshade|mirror|curtain|window shade|carpet|rug|quilt|pillow|cushion|duvet|mattress|easel|lectern|podium)/i, 'furniture'],
   [/(mug|cup|glass|goblet|bottle|jar|jug|pitcher|bowl|plate|dish|teapot|kettle|saucepan|pan|tray|flask|thermos|tin|can|box|carton|crate|basket|bag|packet|bottlecap|vase|pot|barrel|keg|tub|bin|bucket|container)/i, 'container'],
   [/(sock|shirt|tie|jacket|coat|trousers|pants|jean|skirt|dress|shoe|boot|hat|cap|glove|mitten|scarf|belt|sweater|jumper|hoodie|t-shirt|vest|apron|bib|gown|uniform|swimwear|bikini|maillot|cloth|fabric|textile|wool|velvet|denim|leather|linen|nylon|polyester|silk|satin|towel|blanket|duvet|quilt|carpet|rug|curtain)/i, 'clothing'],
   [/(sign|poster|billboard|plate|plaque|badge|banner|flag|pennant|sticker|label|notice|menu|map|chart)/i, 'sign'],
-  [/(building|house|church|mosque|monastery|palace|castle|dome|barn|lighthouse|dam|viaduct|bridge|pier|dock|patio|gazebo|greenhouse|wall|fence|roof|thatch|tile roof|window|door|stair|pillar|column|arch|triumphal arch|storefront|bookshop|toyshop|bakery|barbershop|butcher shop|shoe shop|confectionery|grocery|tobacco shop|restaurant|theatre|cinema|library|prison|hospital|school|factory|warehouse|servery|boathouse|water tower|gas pump|fountain|parking meter|pay-phone booth|post box|mailbox|birdhouse|bird feeder|birdbath|solar dish|radio telescope|obelisk|totem pole|stone wall|picket fence|chain-link fence|chainlink fence|worm fence|fence)/i, 'building'],
+  [/(building|house|church|mosque|monastery|palace|castle|dome|barn|lighthouse|dam|viaduct|bridge|pier|dock|patio|gazebo|greenhouse|wall|fence|roof|thatch|tile roof|window|door|stair|pillar|column|arch|triumphal arch|storefront|bookshop|toyshop|bakery|barbershop|butcher shop|shoe shop|confectionery|grocery|tobacco shop|restaurant|theatre|cinema|library|prison|hospital|school|factory|warehouse|servery|boathouse|water tower|gas pump|fountain|parking meter|pay-phone booth|post box|mailbox|birdhouse|bird feeder|birdbath|solar dish|radio telescope|obelisk|totem pole|stone wall|picket fence|chain-link fence|chainlink fence|worm fence)/i, 'building'],
   [/(ball|bat|racket|club|skis|ski|snowboard|surfboard|paddle|canoe|kayak|puck|barbell|dumbbell|trampoline|swing|seesaw|carousel|merry|Ferris wheel|scoreboard|punching bag|gym|treadmill|stairmaster|rowing machine|balance beam|parallel bars|horizontal bar|ski|snorkel|swimming cap|parachute|volleyball|basketball|soccer|football|tennis|badminton|cricket|rugby|golf|hockey|baseball)/i, 'sport'],
   [/(rifle|revolver|cannon|missile|projectile|bomb|bow|crossbow|shield|armour|breastplate|helmet|bulletproof vest|assault)/i, 'weapon'],
   [/(scale|stethoscope|syringe|band aid|mask|oxygen|medicine|thermometer|microscope|petri|beaker|lab coat|crutch|wheelchair)/i, 'medical'],
@@ -347,7 +321,7 @@ export function categoryOf(name, fallback = 'misc') {
   return fallback;
 }
 
-/* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *\
  * Indices
  * ------------------------------------------------------------------ */
 
@@ -382,8 +356,8 @@ for (const rec of OBJECTS) indexRecord(rec);
 
 /**
  * Every ImageNet class becomes a KB entry too, so the classifier's 1000-class
- * vocabulary is first-class: it can be spoken, ranged, textured and searched
- * exactly like the curated rows.
+ * vocabulary is first-class: it can be looked up and named exactly like the
+ * curated rows.
  */
 export const IMAGENET_KB = IMAGENET_LABELS.map((raw, index) => {
   const label = raw.replace(/\s*\(.*?\)\s*/g, ' ').trim();
@@ -434,7 +408,7 @@ function editDistance(a, b, cap = 2) {
 
 /**
  * Resolve free text to a KB record. Deliberately forgiving: "socket",
- * "sockets", "plug socket", "power point" and "outlet" all land on one row.
+ * "sockets", "plug socket" and "power point" all land on one row.
  */
 export function lookup(text, { fuzzy = true } = {}) {
   const key = norm(text);
@@ -461,91 +435,13 @@ export function lookup(text, { fuzzy = true } = {}) {
   return null;
 }
 
-/** Exact name/alias test (no suffix or fuzzy matching) — for query parsing. */
-export function hasExact(term) {
-  const key = norm(term);
-  if (!key) return false;
-  return BY_NAME.has(key) || BY_ALIAS.has(key) || BY_NAME.has(singular(key)) || BY_ALIAS.has(singular(key));
-}
-
 export function tierOf(name) {
   const rec = lookup(name, { fuzzy: false });
   if (rec) return rec.tier;
-  return categoryOf(name) === 'vehicle' || categoryOf(name) === 'person' ? 3 : 1;
+  return categoryOf(name) === 'vehicle' ? 3 : 1;
 }
 
-export function materialsFor(name) {
-  const rec = lookup(name, { fuzzy: false });
-  return rec ? rec.materials : [];
-}
-
-export function coloursFor(name) {
-  const rec = lookup(name, { fuzzy: false });
-  return rec ? rec.colours : DEFAULT_COLOUR;
-}
-
-export function heightFor(name) {
-  const rec = lookup(name, { fuzzy: false });
-  return rec ? rec.height : 0;
-}
-
-export function noteFor(name) {
-  const rec = lookup(name, { fuzzy: false });
-  return rec ? rec.note : '';
-}
-
-export function tagsFor(name) {
-  const rec = lookup(name, { fuzzy: false });
-  return rec ? new Set(rec.tags) : new Set();
-}
-
-export function categoryLabel(category) {
-  return String(category || 'misc').toUpperCase();
-}
-
-/* ------------------------------------------------------------------ *
- * Colour naming
- * ------------------------------------------------------------------ */
-
-const COLOUR_LAB = COLOURS.map((row) => {
-  const [name, hex, family, note] = row.split('|');
-  const r = parseInt(hex.slice(1, 3), 16);
-  const g = parseInt(hex.slice(3, 5), 16);
-  const b = parseInt(hex.slice(5, 7), 16);
-  return { name, hex, family: family || 'neutral', note: note || '', rgb: [r, g, b], lab: rgbToLab(r, g, b) };
-});
-
-export const NAMED_COLOURS = COLOUR_LAB;
-
-/**
- * Nearest named colour in Lab. `prefer` biases toward an object's own colour
- * priors so a silver kettle does not flip between "silver" and "light grey".
- */
-export function nearestColour(lab, { prefer = [], allowMetallic = true } = {}) {
-  let best = null; let bestScore = Infinity;
-  const preferSet = new Set(prefer.map((p) => norm(p)));
-  const METALLIC = new Set(['chrome', 'aluminium', 'titanium', 'silver', 'gold', 'copper', 'brass', 'bronze', 'steel grey', 'pewter', 'gunmetal']);
-  for (const c of COLOUR_LAB) {
-    if (!allowMetallic && METALLIC.has(c.name)) continue;
-    let score = deltaE(lab, c.lab);
-    if (preferSet.has(c.name)) score -= 9;                     // prior wins ties
-    else if (preferSet.size && preferSet.has(c.family)) score -= 3;
-    if (score < bestScore) { bestScore = score; best = c; }
-  }
-  return best;
-}
-
-export function colourFamily(lab) {
-  return nearestColour(lab)?.family || 'neutral';
-}
-
-export function familySwatch(family) {
-  return HUE_FAMILIES[family]?.swatch || '#9aa3ab';
-}
-
-export { HUE_FAMILIES, LIGHT_TEMPERATURES };
-
-/* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *\
  * Brands + signage
  * ------------------------------------------------------------------ */
 
@@ -594,7 +490,7 @@ export function matchSign(text) {
   return null;
 }
 
-/* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *\
  * Naming
  * ------------------------------------------------------------------ */
 
@@ -608,9 +504,8 @@ export const displayName = (name) => DISPLAY_OVERRIDES[name] || name;
 /**
  * Compose the specific label for an object. Order of authority:
  *   brand text on the object  >  classifier refinement  >  detector class
- * and colour/material only ever qualify, never replace, the noun.
  */
-export function nameFor({ cls, refined, brand, colourWord, materialWord, fallback = 'object' } = {}) {
+export function nameFor({ cls, refined, brand, fallback = 'object' } = {}) {
   let noun = refined || cls || fallback;
   const rec = lookup(noun, { fuzzy: false });
   if (rec) noun = rec.name;
@@ -629,41 +524,18 @@ export function nameFor({ cls, refined, brand, colourWord, materialWord, fallbac
   return noun;
 }
 
-/* ------------------------------------------------------------------ *
- * Query helpers (used by the agent's natural-language layer)
+/* ------------------------------------------------------------------ *\
+ * Stats (boot log + tests)
  * ------------------------------------------------------------------ */
-
-export function searchObjects(term, limit = 12) {
-  const key = norm(term);
-  if (!key) return [];
-  const hits = [];
-  for (const rec of BY_NAME.values()) {
-    let score = 0;
-    const n = norm(rec.name);
-    if (n === key) score = 100;
-    else if (n.startsWith(key)) score = 80;
-    else if (n.includes(key)) score = 60;
-    else if (rec.aliases.some((a) => norm(a).includes(key))) score = 50;
-    else if (rec.category === key) score = 30;
-    else if (rec.materials.some((m) => norm(m).includes(key))) score = 25;
-    else if (editDistance(n, key) <= 1 && key.length > 4) score = 20;
-    if (score) hits.push({ rec, score });
-  }
-  return hits.sort((a, b) => b.score - a.score).slice(0, limit).map((h) => h.rec);
-}
 
 export function stats() {
   return {
     objects: OBJECTS.length,
     aliases: BY_ALIAS.size,
     imagenet: IMAGENET_KB.length,
-    materials: MATERIALS.length,
-    colours: COLOUR_LAB.length,
     brands: BRAND_INDEX.length,
-    conditions: CONDITIONS.length,
-    finishes: FINISHES.length,
     vocabulary: BY_NAME.size + BY_ALIAS.size
   };
 }
 
-export { MATERIALS, FINISHES, CONDITIONS, SIGN_LEXICON, BRANDS };
+export { SIGN_LEXICON, BRANDS };

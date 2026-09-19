@@ -1,55 +1,61 @@
 /**
- * config.js — taxonomy, themes, phrase bank, settings.
+ * config.js — version, taxonomy and the runtime tuning table.
  *
- * The category table is the single source of truth for HUD colour, spoken
- * register and scene inference, so it covers everything the perception stack can
- * say — not just the 80 COCO classes but the ~1800 things the knowledge base and
- * ImageNet head can name.
+ * There is no user-facing settings surface in this build: the camera app has
+ * nothing to configure, so the knobs live here as one hard-coded table with
+ * values chosen for the two things the app exists to do — tag an object the
+ * instant it is pointed at, and keep recognising as much of the scene as the
+ * models can name.
  */
 
-export const VERSION = '2.1.0';
-export const BUILD = 'ARGUS-2.0.2/vision-agent';
+export const VERSION = '3.0.0';
+export const BUILD = 'ARGUS-3.0.0/instant-recognition';
 
-/* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *\
  * Category taxonomy
+ *
+ * The single source of truth for the overlay's category dot colour. It
+ * covers everything the perception stack can say — not just the 80 COCO
+ * classes but the ~2 800 things the knowledge base and ImageNet head name.
+ * Colours are deliberately muted: a recognition overlay should read as an
+ * instrument, not a scoreboard.
  * ------------------------------------------------------------------ */
 
 export const CATEGORIES = {
-  person:     { label: 'CREW',      colour: '#4ce0ff', register: 'crew' },
-  face:       { label: 'FACE',      colour: '#7fe8ff', register: 'crew' },
-  vehicle:    { label: 'VEHICLE',   colour: '#ffd166', register: 'vehicle' },
-  animal:     { label: 'BIOTA',     colour: '#7dff9b', register: 'animal' },
-  plant:      { label: 'FLORA',     colour: '#5fd27a', register: 'flora' },
-  food:       { label: 'RATION',    colour: '#ffe066', register: 'ration' },
-  kitchen:    { label: 'SERVICE',   colour: '#ffa14c', register: 'service' },
-  appliance:  { label: 'APPLIANCE', colour: '#ff9d5c', register: 'appliance' },
-  tech:       { label: 'TECH',      colour: '#9d8bff', register: 'tech' },
-  device:     { label: 'DEVICE',    colour: '#9d8bff', register: 'tech' },
-  fitting:    { label: 'FITTING',   colour: '#ffb2d8', register: 'fitting' },
-  tool:       { label: 'TOOL',      colour: '#8ab4ff', register: 'tool' },
-  furniture:  { label: 'FURNISH',   colour: '#8fb3a8', register: 'furniture' },
-  textile:    { label: 'TEXTILE',   colour: '#d4a5ff', register: 'textile' },
-  clothing:   { label: 'WEARABLE',  colour: '#ff9de0', register: 'clothing' },
-  container:  { label: 'CONTAINER', colour: '#c9d4e4', register: 'container' },
-  stationery: { label: 'STATIONERY', colour: '#a8d5ff', register: 'stationery' },
-  sign:       { label: 'SIGNAGE',   colour: '#7dffd4', register: 'sign' },
-  building:   { label: 'STRUCTURE', colour: '#b8b8b8', register: 'building' },
-  medical:    { label: 'MEDICAL',   colour: '#ff8f8f', register: 'medical' },
-  safety:     { label: 'SAFETY',    colour: '#ff6b6b', register: 'safety' },
-  hygiene:    { label: 'HYGIENE',   colour: '#9be8ff', register: 'hygiene' },
-  sport:      { label: 'SPORT',     colour: '#ffcf70', register: 'sport' },
-  toy:        { label: 'TOY',       colour: '#ffd1f0', register: 'toy' },
-  musical:    { label: 'MUSIC',     colour: '#c9a7ff', register: 'music' },
-  jewellery:  { label: 'VALUABLE',  colour: '#ffe08a', register: 'jewellery' },
-  money:      { label: 'VALUABLE',  colour: '#ffe08a', register: 'jewellery' },
-  weapon:     { label: 'CONTROLLED', colour: '#ff5b5b', register: 'weapon' },
-  misc:       { label: 'OBJECT',    colour: '#c9d4e4', register: 'misc' }
+  person:     { label: 'Person',     colour: '#59c2ff' },
+  face:       { label: 'Face',       colour: '#7fd6ff' },
+  vehicle:    { label: 'Vehicle',    colour: '#f2c94c' },
+  animal:     { label: 'Animal',     colour: '#6fd98f' },
+  plant:      { label: 'Plant',      colour: '#54c07c' },
+  food:       { label: 'Food',       colour: '#f0d464' },
+  kitchen:    { label: 'Kitchen',    colour: '#f0a35e' },
+  appliance:  { label: 'Appliance',  colour: '#f0955c' },
+  tech:       { label: 'Tech',       colour: '#9a8cf5' },
+  device:     { label: 'Device',     colour: '#9a8cf5' },
+  fitting:    { label: 'Fitting',    colour: '#e89ac2' },
+  tool:       { label: 'Tool',       colour: '#7fa8f0' },
+  furniture:  { label: 'Furniture',  colour: '#8fb3a8' },
+  textile:    { label: 'Textile',    colour: '#c9a3f0' },
+  clothing:   { label: 'Wearable',   colour: '#f09ad2' },
+  container:  { label: 'Container',  colour: '#c3cedd' },
+  stationery: { label: 'Stationery', colour: '#9cc9f0' },
+  sign:       { label: 'Sign',       colour: '#6fe0c0' },
+  building:   { label: 'Structure',  colour: '#b5bdc7' },
+  medical:    { label: 'Medical',    colour: '#f08f8f' },
+  safety:     { label: 'Safety',     colour: '#f06b6b' },
+  hygiene:    { label: 'Hygiene',    colour: '#8fd9f0' },
+  sport:      { label: 'Sport',      colour: '#f0c46e' },
+  toy:        { label: 'Toy',        colour: '#f0b4dc' },
+  musical:    { label: 'Music',      colour: '#bda0f0' },
+  jewellery:  { label: 'Valuable',   colour: '#e8c87f' },
+  money:      { label: 'Valuable',   colour: '#e8c87f' },
+  weapon:     { label: 'Controlled', colour: '#f07070' },
+  misc:       { label: 'Object',     colour: '#c3cedd' }
 };
 
 export const categoryColour = (category) => CATEGORIES[category]?.colour || CATEGORIES.misc.colour;
-export const categoryLabel = (category) => CATEGORIES[category]?.label || 'OBJECT';
 
-/* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *\
  * COCO-80 (the detector head)
  * ------------------------------------------------------------------ */
 
@@ -101,308 +107,57 @@ export const COCO_META = {
   toothbrush: ['toothbrush', 'hygiene']
 };
 
-export const DISPLAY_NAMES = Object.fromEntries(
-  Object.entries(COCO_META).map(([k, [name]]) => [k, name.toUpperCase().replace(' ', ' ')])
-);
-
-/* ------------------------------------------------------------------ *
- * Themes
+/* ------------------------------------------------------------------ *\
+ * Runtime tuning
+ *
+ * The detector alone is a complete app — everything else sharpens the names
+ * as it loads and runs in the background, so the first tag always lands as
+ * fast as the detector can say so.
  * ------------------------------------------------------------------ */
 
-export const THEMES = {
-  arc: {
-    label: 'ARC', accent: '#4ce0ff',
-    vars: {
-      '--accent': '#4ce0ff', '--accent-dim': '#1b6f8c', '--accent-glow': 'rgba(76,224,255,.35)',
-      '--bg-0': '#02060c', '--bg-1': '#061420', '--bg-2': 'rgba(6,20,32,.72)',
-      '--ink': '#dff6ff', '--line': 'rgba(76,224,255,.22)'
-    }
-  },
-  mark7: {
-    label: 'MARK VII', accent: '#ffb347',
-    vars: {
-      '--accent': '#ffb347', '--accent-dim': '#8a5a12', '--accent-glow': 'rgba(255,179,71,.32)',
-      '--bg-0': '#0b0703', '--bg-1': '#1a1005', '--bg-2': 'rgba(26,16,5,.72)',
-      '--ink': '#ffeed6', '--line': 'rgba(255,179,71,.22)'
-    }
-  },
-  ghost: {
-    label: 'GHOST', accent: '#e8f4ff',
-    vars: {
-      '--accent': '#e8f4ff', '--accent-dim': '#6d8296', '--accent-glow': 'rgba(232,244,255,.22)',
-      '--bg-0': '#05070a', '--bg-1': '#0d1219', '--bg-2': 'rgba(13,18,25,.72)',
-      '--ink': '#eef6ff', '--line': 'rgba(232,244,255,.18)'
-    }
-  },
-  matrix: {
-    label: 'GREEN', accent: '#6dff9b',
-    vars: {
-      '--accent': '#6dff9b', '--accent-dim': '#1f6b3c', '--accent-glow': 'rgba(109,255,155,.3)',
-      '--bg-0': '#010604', '--bg-1': '#03150c', '--bg-2': 'rgba(3,21,12,.72)',
-      '--ink': '#d8ffe8', '--line': 'rgba(109,255,155,.22)'
-    }
-  },
-  amber: {
-    label: 'AMBER HUD', accent: '#ff8a00',
-    vars: {
-      '--accent': '#ff8a00', '--accent-dim': '#7a3f00', '--accent-glow': 'rgba(255,138,0,.3)',
-      '--bg-0': '#000000', '--bg-1': '#0a0600', '--bg-2': 'rgba(10,6,0,.7)',
-      '--ink': '#ffd9a0', '--line': 'rgba(255,138,0,.22)'
-    }
-  },
-  ice: {
-    label: 'ICE', accent: '#a7d8ff',
-    vars: {
-      '--accent': '#a7d8ff', '--accent-dim': '#4a7ba6', '--accent-glow': 'rgba(167,216,255,.28)',
-      '--bg-0': '#04070d', '--bg-1': '#0a1220', '--bg-2': 'rgba(10,18,32,.7)',
-      '--ink': '#e8f4ff', '--line': 'rgba(167,216,255,.2)'
-    }
-  }
-};
-
-/* ------------------------------------------------------------------ *
- * Phrase bank
- * ------------------------------------------------------------------ */
-
-export const LINES = {
-  boot: [
-    'Initialising optical sensor.',
-    'Loading neural core.',
-    'Calibrating visual cortex.',
-    'Systems nominal.'
-  ],
-  greetingMorning: ['Good morning, {addr}. All systems online.'],
-  greetingAfternoon: ['Good afternoon, {addr}. Standing by.'],
-  greetingEvening: ['Good evening, {addr}. Optics engaged.'],
-  greetingNight: ['Working late, {addr}? Argus is online.'],
-  engage: ['Optics engaged. I will call out anything of interest.'],
-  cameraSwitch: ['Switching to {lens} optics.'],
-  targetAcquired: ['Target acquired: {name}.'],
-  targetLocked: ['Locked onto {name}.'],
-  targetLost: ['{Name} lost. Resuming wide scan.'],
-  targetCleared: ['Lock released. Wide scan restored.'],
-  foundOne: ['{Article} {name} in view.', '{Article} {name} detected.', 'I have {article} {name}.'],
-  foundMany: ['{Count} {plural} in view.', 'I count {count} {plural}.'],
-  reacquired: ['{Name} reacquired.'],
-  lost: ['{Name} no longer in view.'],
-  proximityNear: ['{Name} is very close.', '{Name} right ahead, {addr}.'],
-  voiceOn: ['Voice command channel open. I am listening.'],
-  voiceOff: ['Voice command channel closed.'],
-  muted: ['Audio muted.'],
-  unmuted: ['Audio restored.'],
-  captured: ['Capture stored.'],
-  quiet: ['Standing by.'],
-  themeSwitch: ['Interface set to {theme} palette.'],
-  scanStart: ['Running a full spectrum sweep.'],
-  nothing: ['Nothing of interest in view, {addr}.'],
-  help: ['Tap the ring to switch modes. Hold the display to lock. Tap an object for its full read.'],
-  // v2 voice: description with attributes
-  describe: ['{Article} {name}, {attributes}.'],
-  describeDistance: ['{Article} {name} at about {distance}.'],
-  materialRead: ['{Name}: {material}, {confidence} percent.'],
-  colourRead: ['{Name} reads as {colour}.'],
-  textFound: ['Text in view: {text}.'],
-  brandFound: ['That is a {name}.'],
-  poseFound: ['{Count} {plural} in view.'],
-  handsSeen: ['Hands detected: {gesture}.'],
-  sceneSummary: ['{Scene}. {Count} objects of interest.'],
-  teachPrompt: ['Select a box, then name the object. I will remember it.'],
-  teachStored: ['Learned: {name}. I will recognise it from now on.'],
-  teachForgotten: ['Forgotten: {name}.'],
-  watchAdded: ['Watching for {name}.'],
-  watchRemoved: ['No longer watching for {name}.'],
-  watchHit: ['{Name} in view.'],
-  hazardFound: ['Caution, {addr}: {note}'],
-  queryUnknown: ['I do not have that in view.'],
-  queryFound: ['{Name}, {position}, {distance}.'],
-  memoryReport: ['I have seen {count} {plural} today.'],
-  moduleLoading: ['Loading {module}.'],
-  moduleReady: ['{Module} online.'],
-  moduleFailed: ['{Module} failed to load.'],
-  detailReport: ['{name}. {attributes}. {extra}'],
-  noText: ['No readable text in view.'],
-  readOut: ['Reading: {text}.'],
-  movement: ['{Name} moving {direction}.'],
-  distanceReport: ['{Name} is about {distance} away.'],
-  conditionFound: ['{Name} looks {condition}. {note}'],
-  // guided search
-  findStart: ['Looking for {term}. I will guide you.', 'Searching for {term}. Turn slowly.'],
-  findCentred: ['{Name} is dead ahead{range}.'],
-  findTurn: ['{Name}{range} — turn {direction}.'],
-  findClosing: ['{Name} getting closer{range}.'],
-  findReceding: ['{Name} drifting away — look back.'],
-  findWait: ['Still looking for {term}. Sweep slowly left to right.'],
-  findStop: ['Stopped looking for {term}.'],
-  findFound: ['Found {term}{range}.'],
-  // relations
-  onSurface: ['On the {surface}: {items}.'],
-  onSurfaceEmpty: ['Nothing on the {surface}.'],
-  partOf: ['{Name} is on the {on}.']
-};
-
-/* ------------------------------------------------------------------ *
- * Settings
- * ------------------------------------------------------------------ */
-
-export const STORAGE_KEY = 'argus.settings.v2';
-export const MEMORY_KEY = 'argus.memory.v2';
-
-export const DEFAULTS = {
-  // interface
-  theme: 'arc',
-  hudStyle: 'standard',        // standard | glasses | minimal | debug
-  showBoxes: true,
-  showLabels: true,
-  showConfidence: true,
-  showAttributes: true,
-  showDistance: true,
-  showRadar: true,
-  showReticle: true,
-  showScene: true,
-  showTicker: true,
-  subtitles: true,
-  mirrorFront: true,
-  haptics: true,
-  units: 'metric',             // metric | imperial
-
-  // detector
-  minConfidence: 0.34,
-  scanSize: 416,               // 320 | 416 | 512 | 640
-  adaptive: true,
-  detailMode: 'off',           // off | auto | 4 | 9  (tiled inference)
+export const CONFIG = {
+  // frame loop
+  minConfidence: 0.34,       // detector score floor
+  scanSize: 416,             // detector input size (multiple of 32)
+  scanFloor: 320,
   maxDetections: 32,
-  backend: 'auto',             // auto | webgpu | wasm
+  backend: 'auto',           // auto | webgpu | wasm
+  mirrorFront: true,
 
-  // modules
-  moduleClassifier: true,
-  moduleOcr: true,
-  modulePose: true,
-  moduleHands: false,
-  classifyEvery: 700,          // ms between classifier passes per object
+  // detail: 'auto' runs 2×2 overlapping tiles on top of the full frame while
+  // the full frame stays fast enough to spare — small objects survive.
+  detailMode: 'auto',
+  tileBudgetMs: 90,
+
+  // classifier (1000-class refinement, in frame, budgeted)
+  classifyEvery: 500,
   classifyTopK: 5,
-  classThreshold: 0.28,
-  ocrEvery: 2200,
+  classifyBudget: 2,
+  classifyMinArea: 0.002,
+
+  // OCR (background)
+  ocrEvery: 1600,
   ocrMinConfidence: 0.55,
+  ocrMaxLines: 16,
+
+  // pose + hands (background, people only)
   poseEvery: 550,
   handEvery: 700,
-  attributesEvery: 900,
 
-  // perception
-  fovHorizontal: 62,           // degrees — used by the range solver
-  fovCalibrated: false,
-  teachThreshold: 0.62,
-  appearanceSmoothing: 0.55,
+  // tracker
   trackMaxAge: 1400,
+  trackSmooth: 0.55,
 
-  // agent
-  narration: 'standard',       // quiet | standard | chatty
-  address: 'sir',
-  voiceEnabled: true,
-  voiceURI: '',
-  voiceRate: 1.02,
-  voicePitch: 0.92,
-  voiceVolume: 1,
-  voiceCommands: false,
-  autoLock: false,
-  alerts: true,
-  hazardAlerts: true,
-  watchlist: [],
-  narrateBrands: true,
-  narrateMaterials: true,
-  narrateDistance: true,
-  minTierToSpeak: 3,
-  captionsOnHud: true,
-
-  // I/O
-  captureFormat: 'png',
-  saveSessionLog: true
+  // overlay
+  maxLabels: 16,
+  labelFadeMs: 160
 };
 
-export function loadSettings() {
-  let stored = {};
-  try { stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}') || {}; } catch { stored = {}; }
-  const s = { ...DEFAULTS, ...stored };
-  if (!THEMES[s.theme]) s.theme = DEFAULTS.theme;
-  if (![320, 416, 512, 640].includes(Number(s.scanSize))) s.scanSize = DEFAULTS.scanSize;
-  if (!['standard', 'glasses', 'minimal', 'debug'].includes(s.hudStyle)) s.hudStyle = DEFAULTS.hudStyle;
-  if (!Array.isArray(s.watchlist)) s.watchlist = [];
-  return s;
-}
-
-export function saveSettings(settings) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(settings)); } catch { /* private mode */ }
-}
-
-export function resetSettings() {
-  try { localStorage.removeItem(STORAGE_KEY); } catch { /* ignore */ }
-  return { ...DEFAULTS };
-}
-
-export function applyTheme(themeKey) {
-  const theme = THEMES[themeKey] || THEMES.arc;
-  const root = document.documentElement;
-  for (const [k, v] of Object.entries(theme.vars)) root.style.setProperty(k, v);
-  const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute('content', theme.vars['--bg-0']);
-  root.dataset.theme = themeKey;
-  return theme;
-}
-
-/* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *\
  * Helpers
  * ------------------------------------------------------------------ */
 
-const AN_EXCEPTIONS = new Set(['airplane', 'apple', 'elephant', 'orange', 'umbrella', 'oven', 'iron', 'axe', 'inhaler', 'auger', 'hourglass', 'iPod', 'iPad', 'anti-static strap', 'exhaust fan', 'instant camera']);
-export const articleFor = (word) => (AN_EXCEPTIONS.has(word) || /^[aeiou]/i.test(String(word).trim()) ? 'an' : 'a');
-
-export const plural = (word, n) => {
-  if (n === 1) return word;
-  if (/(s|x|ch|sh|z)$/.test(word)) return `${word}es`;
-  if (/[^aeiou]y$/.test(word)) return `${word.slice(0, -1)}ies`;
-  return `${word}s`;
-};
-
-export const titleCase = (s) => String(s).replace(/\b\w/g, (c) => c.toUpperCase());
+export const titleCase = (s) => String(s || '').replace(/\b\w/g, (c) => c.toUpperCase());
 export const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 export const lerp = (a, b, t) => a + (b - a) * t;
 export const now = () => performance.now();
-
-export function template(str, vars = {}) {
-  return String(str).replace(/\{(\w+)\}/g, (_, key) => {
-    if (key in vars) return vars[key];
-    const lc = key.toLowerCase();
-    if (lc in vars) return vars[lc];
-    const tc = key.charAt(0).toUpperCase() + key.slice(1).toLowerCase();
-    if (tc in vars) return vars[tc];
-    return '';
-  }).replace(/\s+([,.!?])/g, '$1').replace(/\s{2,}/g, ' ').trim();
-}
-
-export function pick(list, seed) {
-  if (!list || !list.length) return '';
-  const i = seed === undefined ? Math.floor(Math.random() * list.length) : Math.abs(Math.floor(seed)) % list.length;
-  return list[i];
-}
-
-/** Format a distance in the user's chosen units, with honest precision. */
-export function formatDistance(metres, units = 'metric') {
-  if (metres == null || !Number.isFinite(metres)) return '';
-  if (units === 'imperial') {
-    const feet = metres * 3.28084;
-    if (feet < 10) return `${feet.toFixed(1)} ft`;
-    return `${Math.round(feet)} ft`;
-  }
-  if (metres < 10) return `${metres.toFixed(1)} m`;
-  return `${Math.round(metres)} m`;
-}
-
-/** Bearing in words — used in spoken answers ("to your left"). */
-export function bearingWord(deg) {
-  const d = ((deg + 180) % 360) - 180;   // -180..180, negative = left of centre
-  const a = Math.abs(d);
-  if (a < 6) return 'dead ahead';
-  if (a < 18) return d < 0 ? 'slightly left' : 'slightly right';
-  if (a < 45) return d < 0 ? 'to your left' : 'to your right';
-  if (a < 80) return d < 0 ? 'well to your left' : 'well to your right';
-  return d < 0 ? 'hard left' : 'hard right';
-}
