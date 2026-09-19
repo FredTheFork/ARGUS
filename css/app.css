@@ -56,6 +56,10 @@ body[data-mirror="1"] #cam {
   inset: 0;
   width: 100%;
   height: 100%;
+  /* The overlay covers the whole feed. It draws on the camera, it does not
+     sit in front of it: without this the canvas swallows every touch, drag
+     and pinch the page would otherwise receive. */
+  pointer-events: none;
 }
 
 /* Two quiet lines of chrome — the only DOM on the stage. */
@@ -86,6 +90,12 @@ body[data-mirror="1"] #cam {
   border-radius: 50%;
   background: var(--ok);
   flex: none;
+}
+
+/* Amber until the first full pass has landed: "warming up" and "looking,
+   nothing there" are different answers and the dot must not blur them. */
+.status-dot.warm {
+  background: #e8b93d;
 }
 
 .status-brand {

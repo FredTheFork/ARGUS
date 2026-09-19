@@ -8,8 +8,8 @@
  * models can name.
  */
 
-export const VERSION = '3.0.1';
-export const BUILD = 'ARGUS-3.0.1/instant-recognition';
+export const VERSION = '3.0.2';
+export const BUILD = 'ARGUS-3.0.2/instant-recognition';
 
 /* ------------------------------------------------------------------ *\
  * Category taxonomy

@@ -38,6 +38,9 @@ const state = {
   frameCanvas: null,
   frameCtx: null,
   lastResult: null,
+  // True once a full inference pass has landed. Until then "nothing in view"
+  // means the pipeline is still warming up, and the status dot stays amber.
+  live: false,
   busy: false,
   fps: 0,
   wakeLock: null,
@@ -467,6 +470,9 @@ async function runInference(frame, t) {
   try {
     const result = await state.pipeline.processFrame(frame, { time: t });
     state.lastResult = result;
+    // The first completed pass is the moment seeing becomes knowing: from
+    // here on an empty result describes the scene, not the startup.
+    state.live = true;
   } catch (err) {
     log(`warn: frame failed — ${err.message}`);
   }
@@ -489,9 +495,20 @@ function updateStatus() {
     const n = state.lastResult?.records?.length || 0;
     const left = $('status-left');
     const right = $('status-right');
-    const l = n ? `${n} ${n === 1 ? 'object' : 'objects'} recognised` : 'recognising';
+    // Three honest states, never blurred: still warming up, looking and
+    // finding nothing, and looking and finding something.
+    const l = n
+      ? `${n} ${n === 1 ? 'object' : 'objects'} recognised`
+      : (state.live ? 'no matches in view' : 'recognising');
     if (left && left.textContent !== l) left.textContent = l;
     if (right && right.textContent !== 'on-device · nothing leaves this phone') right.textContent = 'on-device · nothing leaves this phone';
+    // Amber while warming, green once recognition is live. "Is it working?"
+    // is answered on the feed itself, without a tap or a settings screen.
+    const dot = $('status-dot');
+    if (dot && dot.classList) {
+      if (state.live) dot.classList.remove('warm');
+      else dot.classList.add('warm');
+    }
   } catch { /* status is cosmetic, never fatal */ }
 }
 

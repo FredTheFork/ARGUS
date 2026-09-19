@@ -79,6 +79,18 @@ for (const id of ['boot-error', 'demo-fallback', 'stage']) {
   if (el) el.hidden = true;
 }
 
+// Faithful layout: anything inside the [hidden] stage reports no box at all,
+// which is exactly what a browser computes. Handing the app a 390 px canvas it
+// could never have while the stage is hidden is how the 0×0 overlay shipped —
+// every tag was drawn into nothing and no test could see it.
+const stageEl = elements.get('stage');
+for (const id of ['cam', 'hud']) {
+  const el = elements.get(id);
+  if (!el) continue;
+  Object.defineProperty(el, 'clientWidth', { get: () => (stageEl.hidden ? 0 : 390) });
+  Object.defineProperty(el, 'clientHeight', { get: () => (stageEl.hidden ? 0 : 640) });
+}
+
 const body = makeElement('body');
 const head = makeElement('head');
 const documentElement = makeElement('html');
@@ -155,6 +167,13 @@ test('no unhandled rejections during boot', errors.length === 0, errors.map((e) 
 test('runtime config is in force', app.state.settings.scanSize === 416 && app.state.settings.minConfidence > 0, `scan ${app.state.settings.scanSize}, conf ${app.state.settings.minConfidence}`);
 test('element index covers index.html ids', [...html.matchAll(/id="([\w-]+)"/g)].every((m) => elements.has(m[1])));
 
+// The HUD is built while #stage is hidden, so there is no box to measure. It
+// must still hold a real backing store — sized from the viewport, which is what
+// a fixed inset:0 stage is — or the first tags draw into nothing.
+test('overlay canvas is sized even while the stage is hidden (no box to measure)',
+  app.state.hud.width > 0 && app.state.hud.height > 0 && elements.get('hud').width > 0 && elements.get('hud').height > 0,
+  `viewport ${app.state.hud.width}×${app.state.hud.height}, backing ${elements.get('hud').width}×${elements.get('hud').height}`);
+
 /* ── boot recovery wiring ─────────────────────────────────────────────── */
 section('boot recovery wiring');
 const retryBtn = elements.get('boot-retry');
@@ -182,6 +201,11 @@ test('a second attempt does not re-enter', app.maybeEnterStage() === false);
 await new Promise((r) => setTimeout(r, 460));   // hideBoot fades over 380 ms
 test('boot overlay is dismissed', elements.get('boot').hidden === true);
 test('stage is revealed', elements.get('stage').hidden === false);
+// The box exists now — and no window resize fires to announce that. The reveal
+// itself must have handed the overlay the stage's own measured size.
+test('overlay re-syncs to the stage box the moment it is revealed',
+  elements.get('hud').width === 390 && elements.get('hud').height === 640 && app.state.hud.width === 390,
+  `backing ${elements.get('hud').width}×${elements.get('hud').height}, stage client 390×640`);
 test('no unhandled rejections after stage reveal', errors.length === 0, errors.map((e) => e?.message).join('; '));
 
 /* ── overlay sizing (regression: tags invisible on the live feed) ─────── */
@@ -277,6 +301,23 @@ await new Promise((r) => setTimeout(r, 80));
 test('status line pluralises', elements.get('status-left').textContent === '3 objects recognised',
   elements.get('status-left').textContent);
 
+// The dot answers "is it actually working?" without a tap. Strip the class it
+// ships with and prove the loop puts it back: amber means no pass has landed.
+const statusDot = elements.get('status-dot');
+if (statusDot) statusDot.classList.remove('warm');
+await new Promise((r) => setTimeout(r, 80));
+test('status dot is amber while nothing has been recognised yet',
+  !!statusDot && statusDot.classList.contains('warm'), 'warm');
+
+app.state.live = true;
+app.state.lastResult = { records: [], texts: [] };
+await new Promise((r) => setTimeout(r, 80));
+test('status dot turns green once a pass has landed',
+  !!statusDot && !statusDot.classList.contains('warm'), 'green');
+test('a live pass that matched nothing says so — not "recognising"',
+  elements.get('status-left').textContent === 'no matches in view',
+  elements.get('status-left').textContent);
+
 /* ── the HUD survives a real frame state ──────────────────────────────── */
 section('HUD frame render');
 let renderError = null;
@@ -293,6 +334,92 @@ try {
 test('HUD renders a live frame without throwing', !renderError, renderError ? renderError.message : 'DOM-free canvas draw');
 await new Promise((r) => setTimeout(r, 120));
 test('HUD rAF loop survives repeated frames', errors.length === 0, errors.map((e) => e?.message).join('; '));
+
+// A canvas that loses its box mid-flight (a missed resize, an odd webview, a
+// rotation that lands before layout) must re-measure on the next frame rather
+// than discarding every tag for the rest of the session.
+const hudEl = elements.get('hud');
+hudEl.width = 0;
+hudEl.height = 0;
+app.state.hud.width = 0;
+app.state.hud.height = 0;
+app.state.hud.render({ frame: { width: 640, height: 480 }, records: [], texts: [], facing: 'environment' });
+test('a 0×0 overlay re-measures and draws again on the same frame',
+  hudEl.width === 390 && hudEl.height === 640 && app.state.hud.width === 390 && app.state.hud.height === 640,
+  `recovered to ${hudEl.width}×${hudEl.height}`);
+
+/* ── a tag lands on its object, not beside it ─────────────────────────── */
+section('tag alignment (the overlay uses the video’s cover maths)');
+
+// A phone held upright showing a landscape frame: object-fit: cover crops the
+// sides. The overlay must crop identically, or every tag is offset from the
+// thing it names — which is the difference between a recognition camera and a
+// screensaver.
+const alignProbe = makeElement('hud-align', 'canvas');
+alignProbe.clientWidth = 360;
+alignProbe.clientHeight = 640;
+let alignStopped = false;
+const alignPoints = [];
+{
+  const base = alignProbe.getContext('2d');
+  const recorder = {};
+  for (const key of Object.keys(base)) {
+    const value = base[key];
+    if (key === 'measureText') { recorder[key] = () => ({ width: 10 }); continue; }
+    if (typeof value !== 'function') { recorder[key] = value; continue; }
+    if (key === 'stroke') { recorder[key] = () => { alignStopped = true; }; continue; }
+    if (key === 'moveTo' || key === 'lineTo' || key === 'arcTo') {
+      recorder[key] = (x, y) => { if (!alignStopped) alignPoints.push([x, y]); };
+      continue;
+    }
+    recorder[key] = () => undefined;
+  }
+  alignProbe.getContext = () => recorder;
+}
+const hudAlign = new app.state.hud.constructor({ canvas: alignProbe, video: {}, getSettings: () => app.state.settings });
+
+// The outline is the first path drawn, so everything recorded up to the first
+// stroke() is exactly that outline.
+const outlineFor = (box, facing) => {
+  alignPoints.length = 0;
+  alignStopped = false;
+  hudAlign.render({
+    frame: { width: 640, height: 480 },
+    records: [{ id: 1, label: 'chair', cls: 'chair', noun: 'chair', category: 'furniture', confidence: 0.8, box, age: 999, hits: 9 }],
+    texts: [],
+    facing
+  });
+  const xs = alignPoints.map((p) => p[0]);
+  const ys = alignPoints.map((p) => p[1]);
+  return {
+    n: alignPoints.length,
+    cx: (Math.min(...xs) + Math.max(...xs)) / 2,
+    cy: (Math.min(...ys) + Math.max(...ys)) / 2
+  };
+};
+
+const map = hudAlign.coverTransform(640, 480);
+test('the overlay crops the frame exactly like object-fit: cover (no bars to misplace tags)',
+  map.offsetX <= 0 && map.offsetY <= 0 && map.dispW >= hudAlign.width && map.dispH >= hudAlign.height,
+  `scale ${map.scale.toFixed(3)} — drawn ${map.dispW.toFixed(0)}×${map.dispH.toFixed(0)} on ${hudAlign.width}×${hudAlign.height}, offset ${map.offsetX.toFixed(1)},${map.offsetY.toFixed(1)}`);
+
+const centred = outlineFor([270, 190, 370, 290], 'environment');
+test('an object centred in the frame is outlined at the centre of the overlay',
+  centred.n >= 5 && Math.abs(centred.cx - 180) <= 1.5 && Math.abs(centred.cy - 320) <= 1.5,
+  `outline centre ${centred.cx.toFixed(1)},${centred.cy.toFixed(1)} vs 180,320`);
+
+// Front camera: the video is mirrored, so the tag must be too. One box, two
+// facings: it has to land on opposite sides of the screen each time, mirrored
+// about the centre — tag and object stay pinned together whichever way the
+// camera faces.
+const leftBox = [190, 190, 290, 290];   // frame centre x 240 → display x ≈ 73
+const rear = outlineFor(leftBox, 'environment');
+const front = outlineFor(leftBox, 'user');
+test('the front camera mirrors the tag to the side the object appears on',
+  rear.n >= 5 && front.n >= 5
+    && rear.cx < hudAlign.width / 2 && front.cx > hudAlign.width / 2
+    && Math.abs((rear.cx + front.cx) - hudAlign.width) < 1,
+  `rear centre x ${rear.cx.toFixed(1)}, front centre x ${front.cx.toFixed(1)} on a ${hudAlign.width}-wide overlay`);
 
 /* ── the v3 camera-only contract ──────────────────────────────────────── */
 section('camera-only contract');

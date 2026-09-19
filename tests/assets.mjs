@@ -149,6 +149,22 @@ const htmlIds = new Set([...html.matchAll(/id="([\w-]+)"/g)].map((m) => m[1]));
 const missingIds = [...referenced].filter((id) => !htmlIds.has(id));
 test(`app/ui element ids (${referenced.size})`, missingIds.length === 0, missingIds.join(', '));
 
+section('overlay contract');
+// The overlay covers the entire feed, so these two rules are the difference
+// between a canvas that draws on the camera and a canvas that sits in front of
+// it, swallowing every touch and claiming to be live before it is.
+const overlayCss = readFileSync(join(ROOT, 'css/app.css'), 'utf8');
+const hudRule = (overlayCss.match(/#hud\s*\{[^}]*\}/) || [''])[0];
+test('the overlay never swallows a touch meant for the feed',
+  /pointer-events:\s*none/.test(hudRule),
+  'a full-stage canvas without pointer-events:none eats every touch');
+test('the status dot can say "warming up" as well as "live"',
+  /\.status-dot\.warm\s*\{[^}]*background/.test(overlayCss),
+  'without an amber state the dot claims recognition is live before a frame has landed');
+test('the status dot the app drives exists in the markup, starting warm',
+  htmlIds.has('status-dot') && /class="status-dot warm"/.test(html),
+  'the dot must be reachable by id and honest before the first pass');
+
 section('mobile boot contract');
 // Regression guards for the "stuck on the loading screen on mobile" report:
 // three separate defects combined to leave the boot card up forever.
@@ -177,6 +193,9 @@ const htmlVersion = (html.match(/id="boot-ver">([^<]+)</) || [])[1];
 test('config, package.json, service worker and boot card share one version',
   !!appVersion && appVersion === pkg.version && appVersion === swVersion && appVersion === htmlVersion,
   `config=${appVersion} pkg=${pkg.version} sw=${swVersion} html=${htmlVersion}`);
+const buildVersion = (cfgSrc.match(/BUILD = 'ARGUS-([^/]+)\//) || [])[1];
+test('the build string names the version it ships as',
+  !!buildVersion && buildVersion === appVersion, `BUILD=${buildVersion} VERSION=${appVersion}`);
 
 section('data');
 const kb = namespaces.get('js/kb.js');
