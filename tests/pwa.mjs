@@ -168,6 +168,9 @@ async function fireSW(type, event) {
 }
 
 const swCode = readFileSync(join(ROOT, 'sw.js'), 'utf8');
+// Cache names move with the worker version; deriving them here means a version
+// bump edits one file, not this suite.
+const SW_V = (swCode.match(/const VERSION = 'argus-([^']+)'/) || [])[1] || 'UNKNOWN';
 let swLoaded = true;
 try {
   new Function(
@@ -188,15 +191,15 @@ test('service worker evaluates and registers its handlers', swLoaded
 const install = workerEvent();
 await fireSW('install', install);
 const cacheNames = await caches.api.keys();
-test('install pre-caches the shell', cacheNames.includes('argus-2.0.2-core'));
-const coreStore = caches.stores.get('argus-2.0.2-core') || new Map();
+test('install pre-caches the shell', cacheNames.includes(`argus-${SW_V}-core`));
+const coreStore = caches.stores.get(`argus-${SW_V}-core`) || new Map();
 test(`shell holds the app files (${coreStore.size})`, coreStore.size >= 30, [...coreStore.keys()].slice(0, 3).join(', '));
 test('install does NOT pre-fetch the 47 MB of models (background fill owns those)',
-  !cacheNames.includes('argus-2.0.2-models') && !cacheNames.includes('argus-2.0.2-runtime'));
+  !cacheNames.includes(`argus-${SW_V}-models`) && !cacheNames.includes(`argus-${SW_V}-runtime`));
 test('install completes without warnings', swWarnings.length === 0, swWarnings.join('; '));
 
 await fireSW('activate', workerEvent());
-test('activate claims old caches only', (await caches.api.keys()).every((n) => n.startsWith('argus-2.0.2')));
+test('activate claims old caches only', (await caches.api.keys()).every((n) => n.startsWith(`argus-${SW_V}`)));
 
 /* ---- navigation: online then offline ------------------------------- */
 
@@ -223,7 +226,7 @@ offlineMode = false;
 
 const first = await requestViaSW('/vendor/ort.min.js');
 test('runtime fetch passes through and verifies', first && first.status === 200);
-const runtimeStore = caches.stores.get('argus-2.0.2-runtime') || new Map();
+const runtimeStore = caches.stores.get(`argus-${SW_V}-runtime`) || new Map();
 test('runtime payload cached after verification', runtimeStore.size > 0);
 
 fetchLog.length = 0;
@@ -255,8 +258,8 @@ test('background revalidate eventually checked the network',
 
 const ensure = workerEvent({ data: { type: 'argus-ensure-offline' } });
 await fireSW('message', ensure);
-const modelStore = caches.stores.get('argus-2.0.2-models') || new Map();
-const runtimeStore2 = caches.stores.get('argus-2.0.2-runtime') || new Map();
+const modelStore = caches.stores.get(`argus-${SW_V}-models`) || new Map();
+const runtimeStore2 = caches.stores.get(`argus-${SW_V}-runtime`) || new Map();
 test(`ensure-offline fills the runtime cache (${runtimeStore2.size}/3)`, runtimeStore2.size === 3,
   [...runtimeStore2.keys()].map((u) => u.split('/').pop()).join(', '));
 test(`ensure-offline fills the model cache (${modelStore.size}/7) — real bytes, sha-checked format`,
@@ -272,7 +275,7 @@ const purge = workerEvent({
   source: { postMessage: (m) => srcMsg.push(m) }
 });
 await fireSW('message', purge);
-const runtimeAfterPurge = caches.stores.get('argus-2.0.2-runtime') || new Map();
+const runtimeAfterPurge = caches.stores.get(`argus-${SW_V}-runtime`) || new Map();
 test('argus-purge removes the proved-bad payload', runtimeAfterPurge.size === 2,
   `runtime now holds ${runtimeAfterPurge.size}`);
 test('purge acknowledges the page', srcMsg.some((m) => m.type === 'argus-purged' && m.removed >= 1));

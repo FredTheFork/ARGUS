@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <title>ARGUS — Adaptive Recognition &amp; Guidance Utility System</title>
-<meta name="description" content="ARGUS: an on-device visual agent. Object recognition over ~1800 classes, colour and material analysis, text and brand reading, pose and gesture, and a heads-up display built for glasses. Nothing leaves the device.">
+<meta name="description" content="ARGUS: an on-device visual agent. Point it at the world and the objects are outlined and named on the feed. Everything runs locally — nothing leaves the device.">
 <meta name="theme-color" content="#02060c">
 <meta name="color-scheme" content="dark">
 <meta name="mobile-web-app-capable" content="yes">
@@ -40,263 +40,21 @@
         <button id="demo-fallback" class="btn ghost" hidden>Run demo feed</button>
       </div>
     </div>
-    <p class="boot-ver"><span id="boot-ver">2.0.2</span> · <span id="build-id">vision-agent</span></p>
+    <p class="boot-ver"><span id="boot-ver">2.1.0</span> · <span id="build-id">vision-agent</span></p>
   </div>
 </div>
 
-<!-- ══ stage ══════════════════════════════════════════════════════ -->
+<!-- ══ stage ══════════════════════════════════════════════════════
+     Camera-only v2.1: the stage is the feed and the overlay drawn on it.
+     It deliberately carries ZERO interactive elements — no buttons, no
+     fields, no sheets. Point it at the world; objects are outlined and
+     named on the canvas. The only surface that can appear on its own is
+     the hazard alert (div#toasts). -->
 <main id="stage" class="stage" hidden>
   <video id="cam" playsinline muted autoplay></video>
   <canvas id="hud"></canvas>
-
-  <div class="overlay">
-    <!-- status strip -->
-    <header class="statusbar" id="statusbar">
-      <div class="status-left">
-        <span class="brand">ARGUS</span>
-        <span class="chip" id="tlm-ep" title="Compute backend">—</span>
-        <span class="chip" id="tlm-fps" title="HUD frames per second">—</span>
-        <span class="chip" id="tlm-lat" title="Inference latency">—</span>
-        <span class="chip" id="tlm-scan" title="Detector input size">—</span>
-        <span class="chip" id="tlm-batt" title="Battery">—</span>
-      </div>
-      <div class="status-right">
-        <button class="icon-btn" id="btn-modules" title="Modules">◧</button>
-        <button class="icon-btn" id="btn-memory" title="Memory">◫</button>
-        <button class="icon-btn" id="btn-console" title="Log">≡</button>
-        <button class="icon-btn" id="btn-settings" title="Settings">⚙</button>
-      </div>
-    </header>
-
-    <!-- scene readout -->
-    <aside class="scenebar" id="scenebar">
-      <div class="scene-line"><b id="scene-label">scanning</b></div>
-      <div class="scene-sub" id="scene-sub">—</div>
-      <div class="scene-text" id="scene-text"></div>
-      <div class="module-chips" id="module-chips"></div>
-    </aside>
-
-    <!-- object list -->
-    <section class="tracklist" id="tracklist" aria-label="Objects in view"></section>
-
-    <!-- narration ticker -->
-    <div class="ticker" id="ticker"></div>
-
-    <!-- subtitle band -->
-    <div class="subtitle" id="subtitle" hidden></div>
-
-    <!-- radar -->
-    <canvas class="radar" id="radar" width="220" height="220" aria-label="Object bearings"></canvas>
-
-    <!-- query + controls -->
-    <div class="querybar" id="querybar">
-      <button class="icon-btn" id="btn-mic" title="Voice command">🎙</button>
-      <input id="query-input" type="text" placeholder="ask: what is this · what colour · where are my keys" autocomplete="off" enterkeyhint="send">
-      <button class="icon-btn" id="btn-ask" title="Send">➤</button>
-    </div>
-
-    <div class="controls" id="controls">
-      <button class="pill" id="btn-mode-scan" title="Scan tuning">SCAN</button>
-      <button class="ring" id="engage" aria-label="Switch camera">
-        <svg viewBox="0 0 100 100" aria-hidden="true">
-          <circle cx="50" cy="50" r="44"></circle>
-          <path d="M50 26 L50 74 M26 50 L74 50"></path>
-        </svg>
-        <span id="engage-label">OPTICS</span>
-      </button>
-      <button class="pill" id="shutter" title="Capture">◉</button>
-      <button class="pill" id="btn-detail" title="Detail mode">DETAIL</button>
-      <button class="pill" id="btn-pause" title="Pause optics">PAUSE</button>
-    </div>
-
-    <div class="toasts" id="toasts"></div>
-    <div class="filmstrip" id="filmstrip"></div>
-  </div>
+  <div class="toasts" id="toasts"></div>
 </main>
-
-<!-- ══ object detail ══════════════════════════════════════════════ -->
-<section class="sheet" id="detail-sheet" aria-hidden="true">
-  <header class="sheet-head">
-    <h2 id="detail-title">Object</h2>
-    <button class="icon-btn" data-close="detail-sheet">✕</button>
-  </header>
-  <div class="sheet-body" id="detail-body"></div>
-  <footer class="sheet-foot" id="detail-foot"></footer>
-</section>
-
-<!-- ══ modules ════════════════════════════════════════════════════ -->
-<section class="sheet" id="modules-sheet" aria-hidden="true">
-  <header class="sheet-head">
-    <h2>Modules</h2>
-    <button class="icon-btn" data-close="modules-sheet">✕</button>
-  </header>
-  <div class="sheet-body" id="modules-body"></div>
-</section>
-
-<!-- ══ memory ═════════════════════════════════════════════════════ -->
-<section class="sheet" id="memory-sheet" aria-hidden="true">
-  <header class="sheet-head">
-    <h2>Memory</h2>
-    <button class="icon-btn" data-close="memory-sheet">✕</button>
-  </header>
-  <div class="sheet-body" id="memory-body"></div>
-  <footer class="sheet-foot">
-    <button class="btn ghost" id="memory-export">Export</button>
-    <button class="btn ghost" id="memory-import">Import</button>
-    <button class="btn danger" id="memory-clear">Forget everything</button>
-  </footer>
-</section>
-
-<!-- ══ teach ══════════════════════════════════════════════════════ -->
-<section class="sheet" id="teach-sheet" aria-hidden="true">
-  <header class="sheet-head">
-    <h2>Teach</h2>
-    <button class="icon-btn" data-close="teach-sheet">✕</button>
-  </header>
-  <div class="sheet-body">
-    <p class="hint">Name this object once — ARGUS stores its appearance fingerprint and recognises it from then on, at any angle, in any light.</p>
-    <div id="teach-preview" class="teach-preview"></div>
-    <label class="field">
-      <span>Call it</span>
-      <input id="teach-label" type="text" placeholder="my inhaler, plug socket, front door…" autocomplete="off">
-    </label>
-    <div class="suggest" id="teach-suggest"></div>
-  </div>
-  <footer class="sheet-foot">
-    <button class="btn ghost" id="teach-cancel">Cancel</button>
-    <button class="btn" id="teach-save">Learn it</button>
-  </footer>
-</section>
-
-<!-- ══ settings ═══════════════════════════════════════════════════ -->
-<section class="sheet" id="settings-sheet" aria-hidden="true">
-  <header class="sheet-head">
-    <h2>Settings</h2>
-    <button class="icon-btn" data-close="settings-sheet">✕</button>
-  </header>
-  <div class="sheet-body">
-
-    <h3>Interface</h3>
-    <label class="field"><span>Theme</span><select id="set-theme"></select></label>
-    <label class="field"><span>HUD style</span><select id="set-hud">
-      <option value="standard">Standard</option>
-      <option value="glasses">Glasses (large, sparse)</option>
-      <option value="minimal">Minimal</option>
-      <option value="debug">Diagnostic</option>
-    </select></label>
-    <label class="field"><span>Units</span><select id="set-units"><option value="metric">Metric</option><option value="imperial">Imperial</option></select></label>
-    <label class="toggle"><input type="checkbox" id="set-boxes"><span>Boxes</span></label>
-    <label class="toggle"><input type="checkbox" id="set-labels"><span>Labels</span></label>
-    <label class="toggle"><input type="checkbox" id="set-attrs"><span>Colour / material chips</span></label>
-    <label class="toggle"><input type="checkbox" id="set-distance"><span>Distances</span></label>
-    <label class="toggle"><input type="checkbox" id="set-radar"><span>Bearing radar</span></label>
-    <label class="toggle"><input type="checkbox" id="set-reticle"><span>Reticle</span></label>
-    <label class="toggle"><input type="checkbox" id="set-scene"><span>Scene readout</span></label>
-    <label class="toggle"><input type="checkbox" id="set-ticker"><span>Narration ticker</span></label>
-    <label class="toggle"><input type="checkbox" id="set-subtitles"><span>Subtitles</span></label>
-    <label class="toggle"><input type="checkbox" id="set-mirror"><span>Mirror front camera</span></label>
-    <label class="toggle"><input type="checkbox" id="set-haptics"><span>Haptics</span></label>
-
-    <h3>Detection</h3>
-    <label class="field"><span>Confidence floor</span><input type="range" id="set-conf" min="0.15" max="0.8" step="0.01"></label>
-    <label class="field"><span>Scan size</span><select id="set-scan"><option>320</option><option>416</option><option>512</option><option>640</option></select></label>
-    <label class="field"><span>Detail mode</span><select id="set-detail">
-      <option value="off">Off — full frame only</option>
-      <option value="auto">Auto — 4 tiles</option>
-      <option value="4">4 tiles</option>
-      <option value="9">9 tiles (search mode)</option>
-    </select></label>
-    <label class="toggle"><input type="checkbox" id="set-adaptive"><span>Adaptive resolution</span></label>
-    <label class="toggle"><input type="checkbox" id="set-backend-gpu"><span>Prefer WebGPU</span></label>
-
-    <h3>Perception</h3>
-    <label class="toggle"><input type="checkbox" id="set-cls"><span>1000-class classifier</span></label>
-    <label class="toggle"><input type="checkbox" id="set-ocr"><span>Text &amp; brand reading</span></label>
-    <label class="toggle"><input type="checkbox" id="set-pose"><span>Body pose &amp; activity</span></label>
-    <label class="toggle"><input type="checkbox" id="set-hands"><span>Hand gestures</span></label>
-    <label class="field"><span>Classify every (ms)</span><input type="range" id="set-clsrate" min="200" max="2500" step="50"></label>
-    <label class="field"><span>Read text every (ms)</span><input type="range" id="set-ocrrate" min="600" max="6000" step="100"></label>
-    <label class="field"><span>Horizontal field of view (°)</span><input type="range" id="set-fov" min="35" max="100" step="1"></label>
-    <p class="hint">Field of view drives every distance estimate. Widen it if ranges read too close.</p>
-
-    <h3>Assistant</h3>
-    <label class="field"><span>Address me as</span><input type="text" id="set-address" maxlength="24"></label>
-    <label class="field"><span>Narration</span><select id="set-narration">
-      <option value="quiet">Quiet</option><option value="standard">Standard</option><option value="chatty">Chatty</option>
-    </select></label>
-    <label class="field"><span>Speak from tier</span><select id="set-tier">
-      <option value="3">3 — only the important</option>
-      <option value="2">2 — most things</option>
-      <option value="1">1 — everything</option>
-    </select></label>
-    <label class="toggle"><input type="checkbox" id="set-voice"><span>Voice output</span></label>
-    <label class="toggle"><input type="checkbox" id="set-hazard"><span>Hazard alerts</span></label>
-    <label class="toggle"><input type="checkbox" id="set-brands"><span>Name brands read on objects</span></label>
-    <label class="toggle"><input type="checkbox" id="set-materials"><span>Describe materials</span></label>
-    <label class="toggle"><input type="checkbox" id="set-narrdist"><span>Speak distances</span></label>
-    <label class="toggle"><input type="checkbox" id="set-voicecmd"><span>Voice commands (microphone stays open)</span></label>
-    <label class="field"><span>Voice</span><select id="set-voiceuri"></select></label>
-    <label class="field"><span>Rate</span><input type="range" id="set-rate" min="0.6" max="1.6" step="0.02"></label>
-    <label class="field"><span>Pitch</span><input type="range" id="set-pitch" min="0.5" max="1.5" step="0.02"></label>
-
-    <h3>Install &amp; data</h3>
-    <div id="install-panel" class="install-panel"></div>
-    <div class="row">
-      <button class="btn ghost" id="set-reset">Reset settings</button>
-      <button class="btn ghost" id="set-diagnostics">Diagnostics</button>
-    </div>
-    <p class="hint" id="model-info"></p>
-  </div>
-</section>
-
-<!-- ══ console ════════════════════════════════════════════════════ -->
-<section class="sheet" id="console-sheet" aria-hidden="true">
-  <header class="sheet-head">
-    <h2>Log</h2>
-    <button class="icon-btn" data-close="console-sheet">✕</button>
-  </header>
-  <div class="sheet-body console" id="console-log"></div>
-</section>
-
-<!-- ══ help ═══════════════════════════════════════════════════════ -->
-<section class="sheet" id="help-modal" aria-hidden="true">
-  <header class="sheet-head">
-    <h2>ARGUS</h2>
-    <button class="icon-btn" data-close="help-modal">✕</button>
-  </header>
-  <div class="sheet-body">
-    <p class="hint">Tap an object to read it out. Hold the ring to lock a target. Everything runs on this device.</p>
-    <h3>Ask</h3>
-    <ul class="help-list">
-      <li>“what is this” · “describe the scene”</li>
-      <li>“what colour is the mug” · “what is it made of”</li>
-      <li>“where are my keys” · “how far is the bus”</li>
-      <li>“read that sign” · “how many bottles”</li>
-    </ul>
-    <h3>Teach</h3>
-    <ul class="help-list">
-      <li>“teach this as my inhaler” — learns on the spot</li>
-      <li>“watch for dogs” — alerts when one appears</li>
-      <li>“what have you learned” · “forget my mug”</li>
-    </ul>
-    <h3>Control</h3>
-    <ul class="help-list">
-      <li>“lock” · “unlock” · “capture” · “pause”</li>
-      <li>“mute” · “detail mode” · “performance mode”</li>
-      <li>“status” · “modules” · “help”</li>
-    </ul>
-  </div>
-</section>
-
-<!-- ══ photo ══════════════════════════════════════════════════════ -->
-<section class="sheet photo" id="photo-modal" aria-hidden="true">
-  <header class="sheet-head">
-    <h2 id="photo-stamp">Capture</h2>
-    <button class="icon-btn" data-close="photo-modal">✕</button>
-  </header>
-  <div class="sheet-body"><img id="photo-img" alt="capture"></div>
-  <footer class="sheet-foot"><a class="btn" id="photo-dl" download="argus-capture.png">Download</a></footer>
-</section>
 
 <noscript>
   <div style="position:fixed;inset:0;z-index:99;display:grid;place-items:center;background:#02060c;color:#dff6ff;font-family:system-ui,sans-serif">

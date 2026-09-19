@@ -8,7 +8,7 @@
  * starts, survives a hostile environment, reports the failure in the interface
  * and never throws into the void.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test, section } from './harness.mjs';
@@ -73,12 +73,12 @@ const elements = new Map();
 for (const m of html.matchAll(/id="([\w-]+)"/g)) elements.set(m[1], makeElement(m[1]));
 // Mirror the initial hidden state declared in the markup, so a test can prove
 // the app revealed them rather than finding them already revealed.
-for (const id of ['boot-error', 'demo-fallback', 'subtitle', 'stage']) {
+for (const id of ['boot-error', 'demo-fallback', 'stage']) {
   const el = elements.get(id);
   if (el) el.hidden = true;
 }
-// Elements the app creates itself (ui.js renders the install button).
-for (const extra of ['install-btn']) elements.set(extra, makeElement(extra));
+// v2.1 injects nothing at runtime: the stage is static markup with no
+// interactive elements, so there is no element to pre-register here.
 
 const body = makeElement('body');
 const head = makeElement('head');
@@ -158,7 +158,8 @@ test('interface offers the demo feed', demoBtn && demoBtn.hidden === false);
 test('no unhandled rejections during boot', errors.length === 0, errors.map((e) => e?.message).join('; '));
 test('default settings applied', app.state.settings.minConfidence > 0 && app.state.settings.theme === 'arc', `theme ${app.state.settings.theme}`);
 test('memory loaded', !!app.state.memory && typeof app.state.memory.summary === 'function');
-test('speech object constructed', !!app.state.voice && typeof app.state.voice.say === 'function');
+test('voice and installer stay out of the boot path (v2.1: speech and install unused)',
+  app.state.voice === undefined && app.state.installer === undefined && app.state.narrator === undefined);
 test('HUD constructed', !!app.state.hud && !!app.state.hud.ctx, app.state.hud ? 'canvas context bound' : 'no HUD');
 test('element index covers index.html ids', [...html.matchAll(/id="([\w-]+)"/g)].every((m) => elements.has(m[1])));
 
@@ -189,37 +190,97 @@ test('stage is revealed', elements.get('stage').hidden === false);
 test('no unhandled rejections after stage reveal', errors.length === 0, errors.map((e) => e?.message).join('; '));
 
 /* ── the HUD survives a real frame state ──────────────────────────────── */
-section('HUD frame render (regression: reticle ReferenceError)');
-// Default settings turn the reticle on, and the first frame used to throw
-// `t is not defined` on every render — killing the HUD rAF chain outright.
+section('HUD frame render');
 let renderError = null;
 try {
   app.state.hud.render({
     frame: { width: 640, height: 480 },
     records: [],
     texts: [],
-    scene: null,
-    lighting: null,
-    timing: { detect: 12 },
-    scanSize: 416,
-    backend: 'WASM SIMD',
-    fps: 30,
-    battery: '100%',
-    modules: {},
-    memorySummary: { taught: 0, known: 0 },
-    lockedId: null,
-    paused: false,
-    facing: 'environment',
-    tickerLine: 'test',
-    find: null,
-    lastSpoken: ''
+    facing: 'environment'
   });
 } catch (err) {
   renderError = err;
 }
-test('HUD renders a live frame without throwing', !renderError, renderError ? renderError.message : 'reticle, brackets, telemetry, DOM sync');
+test('HUD renders a live frame without throwing', !renderError, renderError ? renderError.message : 'brackets, names, DOM-free');
 await new Promise((r) => setTimeout(r, 120));
 test('HUD rAF loop survives repeated frames', errors.length === 0, errors.map((e) => e?.message).join('; '));
+
+/* ── v2.1 camera-only contract ────────────────────────────────────────── */
+section('v2.1 camera-only contract');
+
+// The stage is the feed plus the overlay drawn on it — and nothing a finger
+// can press. Boot-recovery buttons live on the boot card, deliberately outside
+// <main id="stage">.
+const stageHtml = (html.match(/<main id="stage"[\s\S]*?<\/main>/) || [''])[0];
+test('the stage carries zero interactive elements',
+  !/<button|<input|<select|<textarea|<a\s|<label|onclick=/i.test(stageHtml)
+    && /id="cam"/.test(stageHtml) && /id="hud"/.test(stageHtml) && /id="toasts"/.test(stageHtml),
+  stageHtml.includes('<button') ? 'an interactive tag sits inside #stage' : 'video, overlay canvas, hazard toasts — nothing else');
+
+// A first-seen object is outlined and named on that very frame: no dwell, no
+// confirmation, nothing to tap. age 0 / hits 1 is literally the first frame.
+const outlineLog = [];
+const probe = makeElement('hud-firstframe', 'canvas');
+{
+  const base = probe.getContext('2d');
+  const recorder = {};
+  for (const key of Object.keys(base)) {
+    const value = base[key];
+    if (typeof value === 'function') {
+      recorder[key] = (...args) => {
+        outlineLog.push([key, args[0]]);
+        return key === 'measureText' ? { width: 10 } : undefined;
+      };
+    } else {
+      recorder[key] = value;
+    }
+  }
+  probe.getContext = () => recorder;
+}
+const hudProbe = new app.state.hud.constructor({ canvas: probe, video: {}, getSettings: () => app.state.settings });
+hudProbe.render({
+  frame: { width: 640, height: 480 },
+  records: [{
+    id: 7, label: 'mug', cls: 'cup', noun: 'mug', category: 'kitchen', confidence: 0.9,
+    box: [100, 100, 200, 200], hazard: null, age: 0, hits: 1, synthetic: false
+  }],
+  texts: [],
+  facing: 'environment'
+});
+const drewOutline = outlineLog.some(([kind]) => kind === 'stroke');
+const drewName = outlineLog.some(([kind, arg]) => kind === 'fillText' && /MUG/.test(String(arg)));
+test('outlines and names land on the first frame an object is seen (age 0, hits 1)',
+  drewOutline && drewName, `${outlineLog.length} draw calls, name ${drewName ? 'drawn' : 'missing'}`);
+
+// Hazards are the one channel that may interrupt: an object the pipeline flags
+// hazardous alerts once per sighting; everything else stays silent, and the
+// old proactive channels (narrator, voice, ticker, subtitles) are gone.
+app.state.hazardAlertedAt = new Map();
+const hotKettle = {
+  id: 11, label: 'kettle', noun: 'kettle', category: 'appliance', tier: 3, confidence: 0.8,
+  box: [0, 0, 50, 50], hazard: { kind: 'hot', note: 'boiling water — keep your distance' }
+};
+const plainMug = { id: 12, label: 'mug', noun: 'mug', category: 'kitchen', tier: 2, confidence: 0.8, box: [60, 0, 110, 50], hazard: null };
+const hazardHit = app.evaluateHazards({ records: [hotKettle, plainMug] });
+const hazardRepeat = app.evaluateHazards({ records: [hotKettle] });
+const plainOnly = app.evaluateHazards({ records: [plainMug] });
+const appSrc = readFileSync(join(ROOT, 'js/app.js'), 'utf8');
+test('hazard alerts are the only proactive UI — alert once, debounce repeats, silence for plain objects',
+  hazardHit.length === 1 && hazardHit[0].kind === 'hot'
+    && hazardRepeat.length === 0 && plainOnly.length === 0
+    && /evaluateHazards/.test(appSrc) && /toast\(/.test(appSrc)
+    && !/Narrator|voice\.say|VoiceInput|subtitle|ticker/i.test(appSrc),
+  hazardHit.map((h) => h.text).join(' | ') || 'no alert');
+
+// The language, speech and install modules stay in the tree — healthy and
+// tested by their own suites — but this build never imports them.
+const unusedStillShipped = ['js/agent.js', 'js/speech.js', 'js/install.js'].every((f) => existsSync(join(ROOT, f)));
+const appImportsClean = !/from '\.\/(agent|speech|install)\.js'/.test(appSrc);
+test('agent/speech/install stay in the tree but are unused by the app',
+  unusedStillShipped && appImportsClean
+    && app.state.voice == null && app.state.installer == null,
+  unusedStillShipped && appImportsClean ? 'three modules shipped, zero imports' : 'imports leaked into app.js');
 
 /* ── demo entry recovers from the failure state ───────────────────────── */
 section('demo feed entry');
