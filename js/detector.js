@@ -13,7 +13,7 @@
  * export is dynamic.
  */
 
-import { Runtime, fitSize, toTensor, nms, resizeImageData, iou, boxArea, clamp } from './core.js';
+import { Runtime, fitSize, toTensor, nms, iou, boxArea, clamp } from './core.js';
 import { CLASSES } from './config.js';
 
 const MODEL_URL = 'models/yolov8n.onnx';
@@ -67,6 +67,40 @@ export class Detector {
     const started = performance.now();
     const all = [];
     const plan = this._tilePlan(img, size, tiles);
+    for (let ti = 0; ti < plan.length; ti++) {
+      const region = plan[ti];
+      const crop = region.full ? img : this._crop(img, region);
+      const dets = await this._infer(crop, Math.max(256, Math.round(size / 32) * 32), minScore);
+      const scaleX = region.full ? 1 : region.w / crop.width;
+      const scaleY = region.full ? 1 : region.h / crop.height;
+      for (const d of dets) {
+        all.push({
+          ...d,
+          box: [
+            d.box[0] * scaleX + region.x,
+            d.box[1] * scaleY + region.y,
+            d.box[2] * scaleX + region.x,
+            d.box[3] * scaleY + region.y
+          ],
+          tile: ti
+        });
+      }
+    }
+    const merged = this._merge(all, iouThreshold, maxDetections);
+    this.lastInferMs = Math.round(performance.now() - started);
+    return merged;
+  }
+
+  /**
+   * Run only the overlapping tile plan (no full frame) — used by the pipeline
+   * once the full frame has landed and the device is fast enough to spare.
+   * Returns detections mapped back into full-frame coordinates, merged the
+   * same way a single pass is merged.
+   */
+  async detectTiles(img, { size = 416, minScore = 0.32, target = 2, iouThreshold = 0.5, maxDetections = 40 } = {}) {
+    const started = performance.now();
+    const all = [];
+    const plan = this._tilePlan(img, size, target === 3 ? '9' : '4').slice(1);   // drop the full frame
     for (let ti = 0; ti < plan.length; ti++) {
       const region = plan[ti];
       const crop = region.full ? img : this._crop(img, region);

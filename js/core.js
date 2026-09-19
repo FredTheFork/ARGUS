@@ -10,9 +10,8 @@
  * runtime never touches the network for itself.
  *
  * Everything else in this file exists because the vision modules need it:
- * letterboxing, NHWC/NCHW conversion, perspective warps for OCR quads, edge and
- * texture statistics for the material scorer, non-maximum suppression, k-means
- * in Lab for colour extraction, and a handful of numeric helpers.
+ * letterboxing, NHWC/NCHW conversion, perspective warps for OCR quads,
+ * non-maximum suppression, and a handful of numeric helpers.
  */
 
 export const VENDOR = 'vendor/';
@@ -470,53 +469,8 @@ export function toTensor(img, {
 }
 
 /* ------------------------------------------------------------------ *
- * Feature statistics for the material / texture scorers
+ * Numeric helpers
  * ------------------------------------------------------------------ */
-
-export function toLuma(img) {
-  const n = img.width * img.height;
-  const out = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    out[i] = (img.data[i * 4] * 0.299 + img.data[i * 4 + 1] * 0.587 + img.data[i * 4 + 2] * 0.114) / 255;
-  }
-  return out;
-}
-
-export function boxBlur(gray, w, h, r = 1) {
-  const out = new Float32Array(w * h);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      let sum = 0; let count = 0;
-      for (let dy = -r; dy <= r; dy++) {
-        const yy = y + dy;
-        if (yy < 0 || yy >= h) continue;
-        for (let dx = -r; dx <= r; dx++) {
-          const xx = x + dx;
-          if (xx < 0 || xx >= w) continue;
-          sum += gray[yy * w + xx]; count++;
-        }
-      }
-      out[y * w + x] = sum / count;
-    }
-  }
-  return out;
-}
-
-/** Sobel gradient magnitude — drives edge density and structure cues. */
-export function gradient(gray, w, h) {
-  const mag = new Float32Array(w * h);
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-      const gx = -gray[i - w - 1] - 2 * gray[i - 1] - gray[i + w - 1]
-        + gray[i - w + 1] + 2 * gray[i + 1] + gray[i + w + 1];
-      const gy = -gray[i - w - 1] - 2 * gray[i - w] - gray[i - w + 1]
-        + gray[i + w - 1] + 2 * gray[i + w] + gray[i + w + 1];
-      mag[i] = Math.hypot(gx, gy) / 4;
-    }
-  }
-  return mag;
-}
 
 export function mean(arr) {
   let s = 0;
@@ -528,20 +482,6 @@ export function std(arr, m = mean(arr)) {
   let s = 0;
   for (let i = 0; i < arr.length; i++) s += (arr[i] - m) ** 2;
   return arr.length ? Math.sqrt(s / arr.length) : 0;
-}
-
-/** Shannon entropy of the 8-bit luma histogram: grain, weave, noise floor. */
-export function entropy(gray) {
-  const bins = new Uint32Array(256);
-  for (let i = 0; i < gray.length; i++) bins[Math.min(255, Math.max(0, (gray[i] * 255) | 0))]++;
-  const n = gray.length;
-  let e = 0;
-  for (let i = 0; i < 256; i++) {
-    if (!bins[i]) continue;
-    const p = bins[i] / n;
-    e -= p * Math.log2(p);
-  }
-  return e / 8;   // normalised to 0-1
 }
 
 /* ------------------------------------------------------------------ *
@@ -634,139 +574,6 @@ export function cosine(a, b) {
 }
 
 /* ------------------------------------------------------------------ *
- * Colour science
- * ------------------------------------------------------------------ */
-
-export function rgbToLab(r, g, b) {
-  let R = r / 255; let G = g / 255; let B = b / 255;
-  R = R > 0.04045 ? ((R + 0.055) / 1.055) ** 2.4 : R / 12.92;
-  G = G > 0.04045 ? ((G + 0.055) / 1.055) ** 2.4 : G / 12.92;
-  B = B > 0.04045 ? ((B + 0.055) / 1.055) ** 2.4 : B / 12.92;
-  let X = (R * 0.4124 + G * 0.3576 + B * 0.1805) / 0.95047;
-  let Y = (R * 0.2126 + G * 0.7152 + B * 0.0722) / 1.0;
-  let Z = (R * 0.0193 + G * 0.1192 + B * 0.9505) / 1.08883;
-  const f = (t) => (t > 0.008856 ? Math.cbrt(t) : (7.787 * t) + 16 / 116);
-  X = f(X); Y = f(Y); Z = f(Z);
-  return [116 * Y - 16, 500 * (X - Y), 200 * (Y - Z)];
-}
-
-export function labToRgb(L, a, b) {
-  const fy = (L + 16) / 116;
-  const fx = a / 500 + fy;
-  const fz = fy - b / 200;
-  const inv = (t) => (t ** 3 > 0.008856 ? t ** 3 : (t - 16 / 116) / 7.787);
-  const X = 0.95047 * inv(fx);
-  const Y = inv(fy);
-  const Z = 1.08883 * inv(fz);
-  let R = X * 3.2406 + Y * -1.5372 + Z * -0.4986;
-  let G = X * -0.9689 + Y * 1.8758 + Z * 0.0415;
-  let B = X * 0.0557 + Y * -0.2040 + Z * 1.0570;
-  const gam = (c) => 255 * (c > 0.0031308 ? 1.055 * (c ** (1 / 2.4)) - 0.055 : 12.92 * c);
-  return [
-    Math.max(0, Math.min(255, Math.round(gam(R)))),
-    Math.max(0, Math.min(255, Math.round(gam(G)))),
-    Math.max(0, Math.min(255, Math.round(gam(B))))
-  ];
-}
-
-export function rgbToHsv(r, g, b) {
-  r /= 255; g /= 255; b /= 255;
-  const max = Math.max(r, g, b); const min = Math.min(r, g, b);
-  const d = max - min;
-  let h = 0;
-  if (d !== 0) {
-    if (max === r) h = ((g - b) / d) % 6;
-    else if (max === g) h = (b - r) / d + 2;
-    else h = (r - g) / d + 4;
-    h *= 60;
-    if (h < 0) h += 360;
-  }
-  return [h, max === 0 ? 0 : d / max, max];
-}
-/**
- * HSV back to RGB. Used by the colour path: an illuminant correction should
- * move an object's hue without inflating its saturation, or a red mug in a
- * scene that averages slightly red comes back brown.
- */
-export function hsvToRgb(h, s, v) {
-  const hh = ((h % 360) + 360) % 360 / 60;
-  const c = v * s;
-  const x = c * (1 - Math.abs((hh % 2) - 1));
-  const m = v - c;
-  const seg = Math.floor(hh) % 6;
-  const rgb = [[c, x, 0], [x, c, 0], [0, c, x], [0, x, c], [x, 0, c], [c, 0, x]][seg] || [0, 0, 0];
-  return [(rgb[0] + m) * 255, (rgb[1] + m) * 255, (rgb[2] + m) * 255];
-}
-
-export const hexOf = (r, g, b) => `#${[r, g, b].map((v) => Math.max(0, Math.min(255, v | 0)).toString(16).padStart(2, '0')).join('')}`;
-
-/**
- * k-means in Lab with k-means++ seeding. Small k (3-5) over a ≤64×64 patch, so
- * the O(n·k·iters) cost is trivial and the result is stable enough to label.
- */
-export function kmeansLab(samples, k = 4, iters = 8) {
-  if (!samples.length) return [];
-  const pts = samples.map((s) => s.lab);
-  // Deterministic seeding: the point closest to the mean first, then
-  // farthest-first from there. Math.random() here meant the same frame could
-  // read two different colours on two different runs — indefensible for a
-  // camera judged frame to frame, and impossible to test.
-  const mean = pts.reduce((a, p) => [a[0] + p[0], a[1] + p[1], a[2] + p[2]], [0, 0, 0]).map((v) => v / pts.length);
-  let first = 0;
-  let firstD = Infinity;
-  for (let i = 0; i < pts.length; i++) {
-    const d = dist2(pts[i], mean);
-    if (d < firstD) { firstD = d; first = i; }
-  }
-  let centres = [pts[first]];
-  while (centres.length < Math.min(k, pts.length)) {
-    let pick = -1;
-    let pickD = 0;
-    for (let i = 0; i < pts.length; i++) {
-      const d = Math.min(...centres.map((cc) => dist2(pts[i], cc)));
-      if (d > pickD) { pickD = d; pick = i; }
-    }
-    if (pick < 0) break;
-    centres.push(pts[pick]);
-  }
-  const assign = new Array(pts.length).fill(0);
-  for (let it = 0; it < iters; it++) {
-    let moved = false;
-    for (let i = 0; i < pts.length; i++) {
-      let best = 0; let bestD = Infinity;
-      for (let ci = 0; ci < centres.length; ci++) {
-        const d = dist2(pts[i], centres[ci]);
-        if (d < bestD) { bestD = d; best = ci; }
-      }
-      if (assign[i] !== best) { assign[i] = best; moved = true; }
-    }
-    const sums = centres.map(() => [0, 0, 0, 0]);
-    for (let i = 0; i < pts.length; i++) {
-      const a = assign[i]; const s = sums[a];
-      s[0] += pts[i][0]; s[1] += pts[i][1]; s[2] += pts[i][2]; s[3]++;
-    }
-    centres = sums.map((s, i) => (s[3] ? [s[0] / s[3], s[1] / s[3], s[2] / s[3]] : centres[i]));
-    if (!moved) break;
-  }
-  const counts = centres.map(() => 0);
-  for (const a of assign) counts[a]++;
-  return centres.map((cc, i) => ({
-    lab: cc,
-    weight: counts[i] / pts.length,
-    rgb: labToRgb(cc[0], cc[1], cc[2])
-  })).filter((cc) => cc.weight > 0).sort((a, b) => b.weight - a.weight);
-}
-
-function dist2(a, b) {
-  const d0 = a[0] - b[0]; const d1 = a[1] - b[1]; const d2 = a[2] - b[2];
-  return d0 * d0 + d1 * d1 + d2 * d2;
-}
-
-export function deltaE(a, b) {
-  return Math.sqrt(dist2(a, b));
-}
-
-/* ------------------------------------------------------------------ *
  * Misc
  * ------------------------------------------------------------------ */
 
@@ -774,16 +581,6 @@ export const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 export const lerp = (a, b, t) => a + (b - a) * t;
 export const now = () => performance.now();
 export const round = (v, p = 1) => Math.round(v * 10 ** p) / 10 ** p;
-
-/** Exponential smoothing that keeps a target and converges without overshoot. */
-export class Smoother {
-  constructor(alpha = 0.45) { this.alpha = alpha; this.value = null; }
-  push(v) {
-    this.value = this.value === null ? v : this.value + (v - this.value) * this.alpha;
-    return this.value;
-  }
-  reset() { this.value = null; }
-}
 
 /** Rolling window statistics for latency/adaptive-resolution logic. */
 export class Rolling {

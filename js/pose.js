@@ -1,5 +1,5 @@
 /**
- * pose.js — body pose, hand keypoints, gesture and activity inference.
+ * pose.js — body pose, hand keypoints, posture and gesture recognition.
  *
  * Two YOLOv8-pose models, both INT8-quantised to ~3.6 MB:
  *
@@ -7,11 +7,9 @@
  *          hips, knees, ankles) — answers posture, stance, reach and gait
  *   hand  21 keypoints       (wrist, 4 joints × 5 fingers) — answers gesture
  *
- * For an assistant that is meant to be worn, this is the difference between
- * "person" and "person waving", "person crouching", "person pointing at the
- * panel to your left". Gestures also make the HUD usable without touching a
- * phone: a raised palm pauses narration, a point selects what you are pointing
- * at, a fist clears the lock.
+ * This is what lets the tag say more than "person": the pipeline folds
+ * posture and gesture into one short activity word ("sitting", "pointing",
+ * "waving") that rides as the quiet second line of the person's tag.
  */
 
 import { fitSize, toTensor, iou } from './core.js';
@@ -33,19 +31,6 @@ export const HAND_KEYPOINTS = [
   'middle mcp', 'middle pip', 'middle dip', 'middle tip',
   'ring mcp', 'ring pip', 'ring dip', 'ring tip',
   'pinky mcp', 'pinky pip', 'pinky dip', 'pinky tip'
-];
-
-/** Body skeleton — mirror pairs are drawn with one pass each. */
-export const SKELETON = [
-  ['left shoulder', 'right shoulder'],
-  ['left shoulder', 'left elbow'], ['left elbow', 'left wrist'],
-  ['right shoulder', 'right elbow'], ['right elbow', 'right wrist'],
-  ['left shoulder', 'left hip'], ['right shoulder', 'right hip'],
-  ['left hip', 'right hip'],
-  ['left hip', 'left knee'], ['left knee', 'left ankle'],
-  ['right hip', 'right knee'], ['right knee', 'right ankle'],
-  ['nose', 'left shoulder'], ['nose', 'right shoulder'],
-  ['left ear', 'left shoulder'], ['right ear', 'right shoulder']
 ];
 
 export const POSE_INFO = {

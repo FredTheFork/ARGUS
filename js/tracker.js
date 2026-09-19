@@ -1,15 +1,15 @@
 /**
- * tracker.js — identity, motion and appearance memory across frames.
+ * tracker.js — identity across frames.
  *
  * A detection is a measurement; a track is a thing. Tracks give every object a
- * stable identity so the assistant can say "the mug has moved left", keep a lock
- * on a target, learn an appearance fingerprint once instead of re-classifying
- * every frame, and time how long something has been in view.
+ * stable identity so the overlay can tag the same object across frames, hold a
+ * box steady while the detector flickers, and time how long something has been
+ * in view (which drives the label fade-in).
  *
- * Matching is a greedy cost over four signals — IoU, centre distance (normalised
- * by size), class agreement and appearance cosine (when a fingerprint exists).
- * Class is a soft signal, not a hard gate, because the classifier legitimately
- * changes its mind as an object turns.
+ * Matching is a greedy cost over three signals — IoU, centre distance
+ * (normalised by size) and class agreement. Class is a soft signal, not a hard
+ * gate, because the classifier legitimately changes its mind as an object
+ * turns.
  */
 
 import { iou, cosine, lerp, clamp } from './core.js';
@@ -104,40 +104,26 @@ export class Track {
     this.hits = 1;
     this.missing = 0;
     this.state = 'new';
-    this.velocity = [0, 0];
     this.embedding = det.embedding || null;
-    this.attributes = null;
-    this.lastClassified = 0;
-    this.lastAttributePass = 0;
-    this.lastPose = 0;
-    this.lastOcr = 0;
     this.text = null;
+    this.textAt = 0;
     this.brand = null;
-    this.note = '';
-    this.hazard = null;
-    this.distance = null;
+    this.sign = null;
+    this.signRatio = 1;
     this.pose = null;
+    this.posture = null;
+    this.poseScore = 0;
+    this.hands = null;
     this.gesture = null;
-    this.taught = null;
+    this.activity = null;
     this.classifier = null;
     this.refined = null;
+    this.refineConfidence = 0;
     this.tier = det.tier || 1;
-    this.framesSeen = 1;
-    this.locked = false;
-    this.watchHit = false;
-    this.sessionNotes = [];
-    this.history = [];
   }
 
   _update(det, t, smooth) {
-    const dt = Math.max(1, t - this.lastSeen);
-    const prevCentre = centre(this.box);
     for (let i = 0; i < 4; i++) this.box[i] = lerp(this.box[i], det.box[i], smooth);
-    const nextCentre = centre(this.box);
-    // Velocity in pixels per second, smoothed so a single frame cannot spike it.
-    const vx = ((nextCentre[0] - prevCentre[0]) / dt) * 1000;
-    const vy = ((nextCentre[1] - prevCentre[1]) / dt) * 1000;
-    this.velocity = [lerp(this.velocity[0], vx, 0.4), lerp(this.velocity[1], vy, 0.4)];
     this.score = det.score;
     this.smoothScore = lerp(this.smoothScore, det.score, 0.3);
     if (det.cls) this.cls = det.cls;
@@ -145,29 +131,8 @@ export class Track {
     if (det.embedding) this.embedding = det.embedding;
     this.lastSeen = t;
     this.hits++;
-    this.framesSeen++;
     this.missing = 0;
     this.state = 'tracking';
-  }
-
-  speed() {
-    return Math.hypot(this.velocity[0], this.velocity[1]);
-  }
-
-  motion(diag = 1) {
-    const speed = this.speed() / Math.max(1, diag);
-    if (speed < 0.12) return { id: 'stationary', label: 'still', speed };
-    const [vx, vy] = this.velocity;
-    const horizontal = Math.abs(vx) > Math.abs(vy) * 1.4;
-    const dir = horizontal ? (vx > 0 ? 'right' : 'left') : (vy > 0 ? 'down' : 'up');
-    const towardsCamera = diagonallyTowards(this.box, this.velocity);
-    if (towardsCamera === 'closer' && speed > 0.3) return { id: 'approaching', label: 'approaching', speed, dir };
-    if (towardsCamera === 'further' && speed > 0.3) return { id: 'receding', label: 'receding', speed, dir };
-    return { id: `moving ${dir}`, label: `moving ${dir}`, speed, dir };
-  }
-
-  centreOf() {
-    return centre(this.box);
   }
 
   snapshot(t = performance.now()) {
@@ -182,38 +147,18 @@ export class Track {
       lastSeen: t - this.lastSeen,
       hits: this.hits,
       state: this.state,
-      velocity: [...this.velocity],
-      attributes: this.attributes,
-      classifier: this.classifier,
-      refined: this.refined,
-      distance: this.distance,
       text: this.text,
       brand: this.brand,
+      sign: this.sign,
       pose: this.pose,
+      posture: this.posture,
       gesture: this.gesture,
-      note: this.note,
-      hazard: this.hazard,
-      tier: this.tier,
-      taught: this.taught,
-      locked: this.locked,
-      embedding: this.embedding ? Array.from(this.embedding) : null
+      activity: this.activity,
+      tier: this.tier
     };
   }
 }
 
 function centre(b) {
   return [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2];
-}
-
-/**
- * Is this box growing or shrinking? Area change over time is a far more stable
- * "coming at me" signal than raw vertical velocity.
- */
-function diagonallyTowards(box, velocity) {
-  const area = (box[2] - box[0]) * (box[3] - box[1]);
-  const cx = (box[0] + box[2]) / 2;
-  const approxGrowth = -velocity[1] * 0.4 + Math.abs(velocity[0]) * 0.2;
-  if (approxGrowth > 45 && area > 0) return 'closer';
-  if (approxGrowth < -45) return 'further';
-  return null;
 }

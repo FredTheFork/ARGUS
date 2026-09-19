@@ -20,7 +20,7 @@
  *     crops match what the recogniser was trained on.
  */
 
-import { toTensor, warpQuad, rotate180, boxArea, mean } from './core.js';
+import { toTensor, warpQuad, rotate180, boxArea } from './core.js';
 import { OCR_CHARSET, OCR_SPACE_INDEX } from './data/ocrchars.js';
 import { matchBrand, matchSign } from './kb.js';
 
@@ -347,4 +347,4 @@ export function summariseText(lines, maxChars = 90) {
   return joined.length > maxChars ? `${joined.slice(0, maxChars - 1)}…` : joined;
 }
 
-export { boxArea, mean };
+

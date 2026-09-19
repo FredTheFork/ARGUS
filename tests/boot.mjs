@@ -59,7 +59,8 @@ function makeElement(id, tag = 'div') {
       clearRect() {}, fillRect() {}, drawImage() {}, putImageData() {},
       getImageData: (x, y, w, h) => new ImageData(w, h),
       setTransform() {}, save() {}, restore() {}, beginPath() {}, moveTo() {}, lineTo() {},
-      arc() {}, stroke() {}, fill() {}, strokeRect() {}, fillText() {}, measureText: () => ({ width: 10 }),
+      arc() {}, arcTo() {}, closePath() {}, stroke() {}, fill() {}, strokeRect() {},
+      fillText() {}, measureText: () => ({ width: 10 }),
       createLinearGradient: () => ({ addColorStop() {} }),
       setLineDash() {}
     }),
@@ -77,8 +78,6 @@ for (const id of ['boot-error', 'demo-fallback', 'stage']) {
   const el = elements.get(id);
   if (el) el.hidden = true;
 }
-// v2.1 injects nothing at runtime: the stage is static markup with no
-// interactive elements, so there is no element to pre-register here.
 
 const body = makeElement('body');
 const head = makeElement('head');
@@ -91,7 +90,7 @@ globalThis.document = {
   documentElement,
   createElement: (tag) => makeElement(`made-${tag}`, tag),
   getElementById: (id) => elements.get(id) || null,
-  querySelector: (sel) => (sel === 'meta[name="theme-color"]' ? null : null),
+  querySelector: () => null,
   querySelectorAll: () => [],
   addEventListener(type, fn) { (documentListeners[type] || (documentListeners[type] = [])).push(fn); },
   dispatch(type, event = {}) { for (const fn of documentListeners[type] || []) fn(event); },
@@ -142,9 +141,6 @@ const errors = [];
 process.on('unhandledRejection', (err) => errors.push(err));
 
 const app = await import('../js/app.js');
-// Earlier suites import app.js under the generic harness document, which is
-// enough for the import-graph check but not for a real boot. Now that this
-// suite's richer DOM is installed, boot again through the exported entry point.
 await app.start();
 await new Promise((r) => setTimeout(r, 500));
 
@@ -152,21 +148,12 @@ const bootError = elements.get('boot-error');
 const bootDetail = elements.get('boot-detail');
 const demoBtn = elements.get('demo-fallback');
 
-test('boot() ran and read settings', !!app.state.settings, app.state.settings ? `${app.state.settings.theme}, conf ${app.state.settings.minConfidence}` : 'no settings');
-test('camera failure is reported in the interface', bootError && bootError.hidden === false, bootDetail?.textContent?.slice(0, 80));
+test('boot() ran and bound the HUD', !!app.state.settings && !!app.state.hud, app.state.hud ? 'canvas context bound' : 'no HUD');
+test('failure is reported in the interface', bootError && bootError.hidden === false, bootDetail?.textContent?.slice(0, 80));
 test('interface offers the demo feed', demoBtn && demoBtn.hidden === false);
 test('no unhandled rejections during boot', errors.length === 0, errors.map((e) => e?.message).join('; '));
-test('default settings applied', app.state.settings.minConfidence > 0 && app.state.settings.theme === 'arc', `theme ${app.state.settings.theme}`);
-test('memory loaded', !!app.state.memory && typeof app.state.memory.summary === 'function');
-test('voice and installer stay out of the boot path (v2.1: speech and install unused)',
-  app.state.voice === undefined && app.state.installer === undefined && app.state.narrator === undefined);
-test('HUD constructed', !!app.state.hud && !!app.state.hud.ctx, app.state.hud ? 'canvas context bound' : 'no HUD');
+test('runtime config is in force', app.state.settings.scanSize === 416 && app.state.settings.minConfidence > 0, `scan ${app.state.settings.scanSize}, conf ${app.state.settings.minConfidence}`);
 test('element index covers index.html ids', [...html.matchAll(/id="([\w-]+)"/g)].every((m) => elements.has(m[1])));
-
-section('demo fallback');
-const before = elements.get('toasts').children.length;
-await app.state.hud.toast('test toast', 'info');
-test('toast renders', elements.get('toasts').children.length > before);
 
 /* ── boot recovery wiring ─────────────────────────────────────────────── */
 section('boot recovery wiring');
@@ -175,10 +162,9 @@ test('retry button is wired by app.js (plus the inline watchdog)', (retryBtn._li
   `${(retryBtn._listeners.click || []).length} click handlers`);
 
 /* ── the loading screen actually comes down ───────────────────────────── */
-section('stage reveal (regression: boot must not stick at ONLINE)');
+section('stage reveal (regression: boot must not stick)');
 // Simulate both halves of the parallel boot winning, then open the stage the
-// way the real boot does. Before the fix, nothing ever called hideBoot() and
-// the app sat under the loading card forever — the "stuck on mobile" report.
+// way the real boot does.
 app.state.cameraStatus = { ok: true };
 app.state.modelStatus = { ok: true };
 const entered = app.maybeEnterStage();
@@ -188,6 +174,17 @@ await new Promise((r) => setTimeout(r, 460));   // hideBoot fades over 380 ms
 test('boot overlay is dismissed', elements.get('boot').hidden === true);
 test('stage is revealed', elements.get('stage').hidden === false);
 test('no unhandled rejections after stage reveal', errors.length === 0, errors.map((e) => e?.message).join('; '));
+
+/* ── the status line reports what is in view ──────────────────────────── */
+section('status line');
+app.state.lastResult = { records: [{ id: 1 }], texts: [] };
+await new Promise((r) => setTimeout(r, 80));
+test('status line counts objects in view', elements.get('status-left').textContent === '1 object recognised',
+  elements.get('status-left').textContent);
+app.state.lastResult = { records: [{ id: 1 }, { id: 2 }, { id: 3 }], texts: [] };
+await new Promise((r) => setTimeout(r, 80));
+test('status line pluralises', elements.get('status-left').textContent === '3 objects recognised',
+  elements.get('status-left').textContent);
 
 /* ── the HUD survives a real frame state ──────────────────────────────── */
 section('HUD frame render');
@@ -202,12 +199,12 @@ try {
 } catch (err) {
   renderError = err;
 }
-test('HUD renders a live frame without throwing', !renderError, renderError ? renderError.message : 'brackets, names, DOM-free');
+test('HUD renders a live frame without throwing', !renderError, renderError ? renderError.message : 'DOM-free canvas draw');
 await new Promise((r) => setTimeout(r, 120));
 test('HUD rAF loop survives repeated frames', errors.length === 0, errors.map((e) => e?.message).join('; '));
 
-/* ── v2.1 camera-only contract ────────────────────────────────────────── */
-section('v2.1 camera-only contract');
+/* ── the v3 camera-only contract ──────────────────────────────────────── */
+section('camera-only contract');
 
 // The stage is the feed plus the overlay drawn on it — and nothing a finger
 // can press. Boot-recovery buttons live on the boot card, deliberately outside
@@ -215,8 +212,8 @@ section('v2.1 camera-only contract');
 const stageHtml = (html.match(/<main id="stage"[\s\S]*?<\/main>/) || [''])[0];
 test('the stage carries zero interactive elements',
   !/<button|<input|<select|<textarea|<a\s|<label|onclick=/i.test(stageHtml)
-    && /id="cam"/.test(stageHtml) && /id="hud"/.test(stageHtml) && /id="toasts"/.test(stageHtml),
-  stageHtml.includes('<button') ? 'an interactive tag sits inside #stage' : 'video, overlay canvas, hazard toasts — nothing else');
+    && /id="cam"/.test(stageHtml) && /id="hud"/.test(stageHtml) && /id="status-left"/.test(stageHtml),
+  stageHtml.includes('<button') ? 'an interactive tag sits inside #stage' : 'video, overlay canvas, status line — nothing else');
 
 // A first-seen object is outlined and named on that very frame: no dwell, no
 // confirmation, nothing to tap. age 0 / hits 1 is literally the first frame.
@@ -242,45 +239,56 @@ const hudProbe = new app.state.hud.constructor({ canvas: probe, video: {}, getSe
 hudProbe.render({
   frame: { width: 640, height: 480 },
   records: [{
-    id: 7, label: 'mug', cls: 'cup', noun: 'mug', category: 'kitchen', confidence: 0.9,
-    box: [100, 100, 200, 200], hazard: null, age: 0, hits: 1, synthetic: false
+    id: 7, label: 'espresso machine', cls: 'cup', noun: 'espresso machine', category: 'kitchen',
+    confidence: 0.9, box: [100, 100, 200, 200], age: 0, hits: 1
   }],
   texts: [],
   facing: 'environment'
 });
 const drewOutline = outlineLog.some(([kind]) => kind === 'stroke');
-const drewName = outlineLog.some(([kind, arg]) => kind === 'fillText' && /MUG/.test(String(arg)));
-test('outlines and names land on the first frame an object is seen (age 0, hits 1)',
-  drewOutline && drewName, `${outlineLog.length} draw calls, name ${drewName ? 'drawn' : 'missing'}`);
+const drewName = outlineLog.some(([kind, arg]) => kind === 'fillText' && /Espresso Machine/i.test(String(arg)));
+const drewConfidence = outlineLog.some(([kind, arg]) => kind === 'fillText' && /90\s*%/.test(String(arg)));
+test('outline, name and confidence land on the first frame an object is seen (age 0, hits 1)',
+  drewOutline && drewName && drewConfidence,
+  `${outlineLog.length} draw calls, name ${drewName ? 'drawn' : 'missing'}, confidence ${drewConfidence ? 'drawn' : 'missing'}`);
 
-// Hazards are the one channel that may interrupt: an object the pipeline flags
-// hazardous alerts once per sighting; everything else stays silent, and the
-// old proactive channels (narrator, voice, ticker, subtitles) are gone.
-app.state.hazardAlertedAt = new Map();
-const hotKettle = {
-  id: 11, label: 'kettle', noun: 'kettle', category: 'appliance', tier: 3, confidence: 0.8,
-  box: [0, 0, 50, 50], hazard: { kind: 'hot', note: 'boiling water — keep your distance' }
-};
-const plainMug = { id: 12, label: 'mug', noun: 'mug', category: 'kitchen', tier: 2, confidence: 0.8, box: [60, 0, 110, 50], hazard: null };
-const hazardHit = app.evaluateHazards({ records: [hotKettle, plainMug] });
-const hazardRepeat = app.evaluateHazards({ records: [hotKettle] });
-const plainOnly = app.evaluateHazards({ records: [plainMug] });
+// People get their posture word as a quiet second line.
+const personLog = [];
+const probe2 = makeElement('hud-person', 'canvas');
+{
+  const base = probe2.getContext('2d');
+  const recorder = {};
+  for (const key of Object.keys(base)) {
+    if (typeof base[key] === 'function') {
+      recorder[key] = (...args) => { personLog.push([key, args[0]]); return key === 'measureText' ? { width: 10 } : undefined; };
+    } else recorder[key] = base[key];
+  }
+  probe2.getContext = () => recorder;
+}
+const hudProbe2 = new app.state.hud.constructor({ canvas: probe2, video: {}, getSettings: () => app.state.settings });
+hudProbe2.render({
+  frame: { width: 640, height: 480 },
+  records: [{
+    id: 9, label: 'person', cls: 'person', noun: 'person', category: 'person',
+    confidence: 0.84, box: [100, 60, 220, 420], age: 900, hits: 12,
+    posture: 'sitting', activity: { id: 'sitting', label: 'seated', confidence: 0.6 }
+  }],
+  texts: [],
+  facing: 'environment'
+});
+test('person tag carries the posture word', personLog.some(([kind, arg]) => kind === 'fillText' && /Seated/i.test(String(arg))),
+  personLog.filter(([k]) => k === 'fillText').map(([, a]) => a).join(' | '));
+
+// The old proactive channels (narrator, voice, ticker, subtitles, hazard
+// toasts, memory) are gone for good: nothing in the app may import them.
 const appSrc = readFileSync(join(ROOT, 'js/app.js'), 'utf8');
-test('hazard alerts are the only proactive UI — alert once, debounce repeats, silence for plain objects',
-  hazardHit.length === 1 && hazardHit[0].kind === 'hot'
-    && hazardRepeat.length === 0 && plainOnly.length === 0
-    && /evaluateHazards/.test(appSrc) && /toast\(/.test(appSrc)
-    && !/Narrator|voice\.say|VoiceInput|subtitle|ticker/i.test(appSrc),
-  hazardHit.map((h) => h.text).join(' | ') || 'no alert');
-
-// The language, speech and install modules stay in the tree — healthy and
-// tested by their own suites — but this build never imports them.
-const unusedStillShipped = ['js/agent.js', 'js/speech.js', 'js/install.js'].every((f) => existsSync(join(ROOT, f)));
-const appImportsClean = !/from '\.\/(agent|speech|install)\.js'/.test(appSrc);
-test('agent/speech/install stay in the tree but are unused by the app',
-  unusedStillShipped && appImportsClean
-    && app.state.voice == null && app.state.installer == null,
-  unusedStillShipped && appImportsClean ? 'three modules shipped, zero imports' : 'imports leaked into app.js');
+test('no speech, agent, memory, install or hazard channels remain in the app',
+  !/from '\.\/(agent|speech|install|memory|attributes)\.js'/.test(appSrc)
+    && !/Narrator|voice\.say|VoiceInput|subtitle|ticker|toast\(|evaluateHazards/i.test(appSrc)
+    && !existsSync(join(ROOT, 'js/agent.js')) && !existsSync(join(ROOT, 'js/speech.js'))
+    && !existsSync(join(ROOT, 'js/install.js')) && !existsSync(join(ROOT, 'js/memory.js'))
+    && !existsSync(join(ROOT, 'js/attributes.js')),
+  'the five modules are removed and unimported');
 
 /* ── demo entry recovers from the failure state ───────────────────────── */
 section('demo feed entry');

@@ -1,38 +1,35 @@
 /**
- * app.js — ARGUS v2.1: boot, camera, frame loop and the hazard channel.
+ * app.js — ARGUS v3.0: boot, camera and the frame loop.
  *
- * Camera-only build. Point the device at the world: every object seen is
- * outlined and named on the feed, from the first frame it appears. There is
- * nothing to press — the stage carries zero interactive elements — and the
- * only surface the app can raise on its own is a hazard alert. The language,
- * speech and install modules (js/agent.js, js/speech.js, js/install.js) stay
- * in the tree but are deliberately unused by this build; nothing here imports
- * them.
+ * One job: point the camera at the world and every object seen is outlined
+ * and named on the feed, from the first frame it appears. There is nothing to
+ * press, nothing to configure — the stage carries zero interactive elements —
+ * and nothing in this file besides the boot, the camera, the loop and the
+ * status line.
  *
- * The loop runs on two clocks on purpose. The display half runs every animation
- * frame so brackets glide; the inference half runs when the previous pass has
- * finished and enough time has elapsed, so a slow frame never blocks the HUD and
- * a fast device is never throttled by a fixed timer. Everything that could stall
- * a frame — model loads, OCR, pose — happens behind the previous result, with
- * the HUD showing the last known state rather than a frozen screen.
+ * The loop runs on two clocks on purpose. The display half renders the
+ * overlay every animation frame; the inference half runs when the previous
+ * pass has finished and enough time has elapsed, so a slow frame never blocks
+ * the HUD and a fast device is never throttled by a fixed timer. Everything
+ * that could stall a frame — model loads, OCR, pose — happens behind the
+ * previous result, with the overlay showing the last known state rather than
+ * a frozen screen.
  */
 
 import { Runtime } from './core.js';
 import { Pipeline } from './pipeline.js';
-import { Memory } from './memory.js';
 import { Hud } from './ui.js';
-import { VERSION, loadSettings, applyTheme } from './config.js';
+import { VERSION, CONFIG } from './config.js';
 import { stats as kbStats } from './kb.js';
 
-/* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *\
  * State
  * ------------------------------------------------------------------ */
 
 const state = {
-  settings: null,
+  settings: CONFIG,
   runtime: null,
   pipeline: null,
-  memory: null,
   hud: null,
   video: null,
   stream: null,
@@ -43,13 +40,10 @@ const state = {
   lastResult: null,
   busy: false,
   fps: 0,
-  battery: '—',
   wakeLock: null,
   demo: false,
-  demoTimer: null,
+  demoCanvas: null,
   startedAt: Date.now(),
-  // hazard alerts — one per object sighting, re-armed after a cool-down
-  hazardAlertedAt: new Map(),
   // boot bookkeeping — the parallel camera/model race settles through these
   cameraStatus: null,
   modelStatus: null,
@@ -63,27 +57,13 @@ const state = {
 /** How long the camera get is allowed to sit unanswered before boot says so. */
 const CAMERA_TIMEOUT_MS = 25000;
 
-/**
- * How long a hazard alert stays quiet for the same tracked object. The alert
- * must not chatter: one alert per sighting, re-armed if the object goes away
- * and a fresh sighting is logged (a new track id), or after a long cool-down.
- */
-const HAZARD_REARM_MS = 45000;
-
 const $ = (id) => document.getElementById(id);
 
-/* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *\
  * Boot
  * ------------------------------------------------------------------ */
 
 async function boot() {
-  state.settings = loadSettings();
-  applyTheme(state.settings.theme);
-  document.body.dataset.hud = state.settings.hudStyle;
-
-  state.memory = new Memory({ onLog: (msg) => log(msg) }).load();
-  state.memory.beginSession();
-
   state.video = $('cam');
   state.hud = new Hud({
     canvas: $('hud'),
@@ -91,10 +71,10 @@ async function boot() {
     getSettings: () => state.settings
   });
 
-  state.hud.setBootStage('READING SETTINGS', 0.05);
+  state.hud.setBootStage('CHECKING HARDWARE', 0.08);
   log(`ARGUS ${VERSION} — ${new Date().toLocaleString()}`);
   const kb = kbStats();
-  log(`vocabulary: ${kb.objects} objects, ${kb.aliases} aliases, ${kb.brands} brands — ${kb.vocabulary} names total`);
+  log(`vocabulary: ${kb.objects} objects, ${kb.aliases} aliases, ${kb.brands} brands, ${kb.imagenet} ImageNet classes — ${kb.vocabulary} names total`);
 
   bindUI();
 
@@ -103,7 +83,6 @@ async function boot() {
   // model steps play out below.
   registerServiceWorker();
 
-  state.hud.setBootStage('CHECKING HARDWARE', 0.12);
   if (!secureContextOk()) {
     log('error: camera needs a secure context');
     failBoot('Insecure context', 'Camera access requires https:// or localhost. Open the site over TLS, or use the demo feed.', 'camera');
@@ -119,10 +98,10 @@ async function boot() {
   }
 
   /* Camera and models boot in parallel, deliberately. Serial boot meant the
-   * permission prompt held a 25 MB download hostage (and vice versa), which on
-   * mobile data looked exactly like a wedged loading screen. Each side reports
-   * its own outcome; the stage opens only when both have succeeded, and each
-   * failure gets its own honest error instead of a silent hang. */
+   * permission prompt held a ~12 MB download hostage (and vice versa), which
+   * on mobile data looked exactly like a wedged loading screen. Each side
+   * reports its own outcome; the stage opens only when both have succeeded,
+   * and each failure gets its own honest error instead of a silent hang. */
   ensureModels().then((r) => {
     if (!r.ok) {
       log(`error: core load failed — ${r.error.message}`);
@@ -158,7 +137,6 @@ function failBoot(title, detail, kind) {
   state.bootFailed = true;
   state.bootFailKind = kind || null;
   state.hud.bootError(title, detail);
-  offerDemo();
   return true;
 }
 
@@ -171,23 +149,14 @@ function maybeEnterStage() {
   return true;
 }
 
-/** The boot screen comes down and the loop starts. Nothing else to do: the
- * stage needs no greeting, no tour — the feed is the interface. */
+/** The boot screen comes down and the loop starts. The feed is the interface. */
 function enterStage() {
   if (!state.pipeline) { log('warn: enterStage before the pipeline exists — ignored'); return; }
   state.hud.hideBootError();
-  state.hud.bootReady(`${state.pipeline.detector.info().name} · ${kbStats().objects} objects in vocabulary`);
+  state.hud.bootReady(`${state.pipeline.detector.info().name} · ${kbStats().vocabulary} names in vocabulary`);
   state.hud.hideBoot();
   startLoop();
   requestOfflineFill();
-  if (navigator.getBattery) {
-    navigator.getBattery().then((b) => {
-      const update = () => { state.battery = `${Math.round(b.level * 100)}%${b.charging ? '⚡' : ''}`; };
-      update();
-      b.addEventListener('levelchange', update);
-      b.addEventListener('chargingchange', update);
-    }).catch(() => {});
-  }
 }
 
 /** Model loading is a singleton: a retry never runs two downloads side by side. */
@@ -241,15 +210,15 @@ function withDeadline(promise, ms, makeError) {
 }
 
 /**
- * Load the compute runtime and the detector, and kick off the optional
- * perception modules in the background. Returns a verdict — `{ ok: true }` or
- * `{ ok: false, error }` — and never throws, because boot decisions are made by
- * the caller, not by a rejection landing somewhere nobody is watching.
+ * Load the compute runtime and the detector, then kick off the perception
+ * modules in the background. Returns a verdict — `{ ok: true }` or
+ * `{ ok: false, error }` — and never throws, because boot decisions are made
+ * by the caller, not by a rejection landing somewhere nobody is watching.
  *
- * The detector alone is a usable assistant, so the optional modules load
- * without holding up first light. The model manifest is the contract between
- * the shipped files and this code: checking the digests turns "the fetch
- * returned 200" into "these are the bytes that were tested".
+ * The detector alone is a complete app, so the optional modules load without
+ * holding up first light. The model manifest is the contract between the
+ * shipped files and this code: checking the digests turns "the fetch returned
+ * 200" into "these are the bytes that were tested".
  */
 async function runModelBoot() {
   try {
@@ -260,11 +229,12 @@ async function runModelBoot() {
         settings: state.settings,
         onLog: (msg) => log(msg),
         onStatus: (module, status) => {
-          if (status === 'ready') log(`module online: ${module}`);
+          if (status === 'ready') {
+            log(`module online: ${module}`);
+            state.hud.bootLine(`${module} online`);
+          }
         }
       });
-      state.pipeline.teach = state.memory.teach;
-      state.pipeline.onVerified = verifySession;
     }
 
     state.hud.setBootStage('LOADING COMPUTE RUNTIME', 0.2);
@@ -273,11 +243,11 @@ async function runModelBoot() {
       onStage: (stage, pct) => state.hud.setBootStage(stage, pct)
     });
     log(`compute: ${info.label}, ${info.threads} thread${info.threads > 1 ? 's' : ''}`);
-    state.backendLabel = `${info.label}${info.threads > 1 ? ` ×${info.threads}` : ''}`;
+    state.hud.bootLine(`compute runtime ready — ${info.label}${info.threads > 1 ? `, ${info.threads} threads` : ''}`);
 
     state.hud.setBootStage('LOADING DETECTOR', 0.45);
     await state.pipeline.loadCore({
-      onProgress: (pct, msg) => state.hud.setBootStage(msg || 'LOADING DETECTOR', 0.45 + 0.25 * (pct || 0))
+      onProgress: (pct, msg) => state.hud.setBootStage(msg || 'LOADING DETECTOR', 0.45 + 0.3 * (pct || 0))
     });
   } catch (err) {
     return { ok: false, error: err };
@@ -295,10 +265,8 @@ async function runModelBoot() {
     state.expectedHashes = expected;
   }
 
-  state.hud.setBootStage('PERCEPTION MODULES', 0.75);
-  enableBySettings({ onProgress: (pct, msg) => {
-    if (msg) state.hud.bootStageHint = msg;
-  } }).then(() => {
+  state.hud.setBootStage('PERCEPTION MODULES', 0.8);
+  state.pipeline.enableAll({}).then(() => {
     const exp = state.expectedHashes || {};
     verifySession(state.pipeline.detector.session, exp.detector);
     verifySession(state.pipeline.classifier.session, exp.classifier);
@@ -334,14 +302,6 @@ function verifySession(session, expected) {
   else log(`warn: ${session.meta.label} digest mismatch — expected ${expected.slice(0, 12)}…, got ${got.slice(0, 12)}…`);
 }
 
-async function offerDemo() {
-  const btn = $('demo-fallback');
-  if (btn) {
-    btn.hidden = false;
-    btn.onclick = () => startDemo();
-  }
-}
-
 function registerServiceWorker() {
   // serviceWorker is *absent* on plain http (non-localhost) and can even be
   // present-but-undefined in embedded webviews — feature-detect with optional
@@ -350,7 +310,7 @@ function registerServiceWorker() {
   navigator.serviceWorker.addEventListener?.('message', (event) => {
     const data = event.data || {};
     if (data.type === 'argus-offline-ready') {
-      log(`offline cache verified — ${data.total - data.missing}/${data.total} payloads already held, ${data.filled} filled${data.missing - data.filled ? `, ${data.missing - data.filled} deferred to the next online run` : ''}`);
+      log(`offline cache verified — ${data.total - data.missing}/${data.total} payloads held, ${data.filled} filled`);
     }
     if (data.type === 'argus-update-cached') {
       log('update: a refreshed build has been cached — it applies on the next launch');
@@ -365,17 +325,14 @@ function registerServiceWorker() {
 /**
  * Ask the worker to make sure the runtime and model payloads are cached. This
  * runs only after first light: the user's first successful launch should not
- * compete with a second copy of 47 MB moving in the background, and on later
- * launches the bytes are already there (the worker cached them as they passed
- * through on their way to the loader).
+ * compete with a second copy of the payloads moving in the background, and on
+ * later launches the bytes are already there.
  */
 async function requestOfflineFill() {
   try {
     if (!('serviceWorker' in navigator)) return;
     const reg = await withDeadline(navigator.serviceWorker.ready, 15000, () => new Error('no active worker'));
     if (!reg || reg.timedOut || !reg.active) {
-      // Not controlled yet (first ever visit): the worker activates itself, so
-      // a short delay and one retry lands the message even without a reload.
       setTimeout(() => {
         navigator.serviceWorker.getRegistration?.().then((r) => r?.active?.postMessage({ type: 'argus-ensure-offline' })).catch(() => {});
       }, 4000);
@@ -385,7 +342,7 @@ async function requestOfflineFill() {
   } catch { /* offline fill is opportunistic */ }
 }
 
-/* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *\
  * Camera
  * ------------------------------------------------------------------ */
 
@@ -410,10 +367,6 @@ async function startCamera(facing = state.facing) {
   log(`camera: ${caps.width || '?'}×${caps.height || '?'} @ ${caps.frameRate || '?'} fps, ${facing === 'user' ? 'front' : 'rear'}`);
   // Mirror only the front camera — the rear camera's view is not a mirror.
   document.body.dataset.mirror = (facing === 'user' && state.settings.mirrorFront) ? '1' : '0';
-  try {
-    const gpuCap = track.getCapabilities?.();
-    if (gpuCap?.torch) log('note: torch capability present — low light could use it');
-  } catch { /* not supported */ }
   return track;
 }
 
@@ -424,19 +377,19 @@ function stopCamera() {
   }
 }
 
-/* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *\
  * Frame grabbing
  * ------------------------------------------------------------------ */
 
 function grabFrame() {
-  // Demo mode has no <video>: the same still frame is re-read every pass so the
-  // whole pipeline (detector, classifier, OCR, HUD) runs exactly as it would.
-  if (state.demoCanvas) return state.demoCanvas.getContext('2d').getImageData(0, 0, state.demoCanvas.width, state.demoCanvas.height);
+  if (state.demoCanvas) {
+    return state.demoCanvas.getContext('2d').getImageData(0, 0, state.demoCanvas.width, state.demoCanvas.height);
+  }
   const v = state.video;
   if (!v || !v.videoWidth) return null;
   // Work at a fixed processing width; the detector resizes internally anyway and
   // a smaller buffer keeps the copy (the expensive part) cheap.
-  const target = Math.min(960, Math.max(480, state.settings.scanSize * 1.6));
+  const target = Math.min(960, Math.max(480, (state.pipeline?.scanSize || 416) * 1.6));
   const scale = target / v.videoWidth;
   const w = Math.round(v.videoWidth * scale);
   const h = Math.round(v.videoHeight * scale);
@@ -455,7 +408,7 @@ function grabFrame() {
   }
 }
 
-/* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *\
  * Loop
  * ------------------------------------------------------------------ */
 
@@ -476,12 +429,7 @@ function startLoop() {
       fpsAcc = 0; fpsCount = 0;
     }
 
-    if (state.demoPending) {
-      renderHud();
-      return;
-    }
-
-    if (!state.busy && t - lastInferAt > 60) {
+    if (!state.busy && t - lastInferAt > 50) {
       let frame = null;
       try { frame = grabFrame(); }
       catch (err) { warnOnce('grab', `warn: frame grab failed repeatedly — ${err.message}`); }
@@ -501,6 +449,7 @@ function startLoop() {
 function renderHud() {
   try {
     state.hud.render(hudState());
+    updateStatus();
   } catch (err) {
     warnOnce('render', `warn: HUD render failed repeatedly — ${err.message}`);
   }
@@ -518,55 +467,9 @@ async function runInference(frame, t) {
   try {
     const result = await state.pipeline.processFrame(frame, { time: t });
     state.lastResult = result;
-
-    for (const record of result.records) {
-      const obs = state.memory.observe(record);
-      if (obs.novel && record.tier >= 3 && record.confidence > 0.5) {
-        state.memory.addTimeline({ kind: 'sighting', text: `First sighting: ${record.label}`, label: record.label });
-      }
-    }
-
-    // The one proactive channel: hazards. Everything else the pipeline sees is
-    // drawn on the feed; only a hazard may interrupt.
-    for (const hazard of evaluateHazards(result)) {
-      state.hud.toast(hazard.text, 'alert', 4200);
-      log(`hazard: ${hazard.text}`);
-    }
   } catch (err) {
     log(`warn: frame failed — ${err.message}`);
   }
-}
-
-/**
- * Hazard alerts — the only proactive UI in v2.1.
- *
- * The pipeline flags a record `hazard` the moment the object is named (live
- * conductors, a flammable sign read by OCR, a sharp blade). Each tracked
- * object alerts once per sighting: the alert is debounced per track id and
- * re-armed only after a cool-down, so a kettle sitting in view never nags.
- * Returns the alert lines; delivering them (hud.toast, 'alert') is the job of
- * the frame loop, and nothing else in the app may raise a surface on its own.
- */
-function evaluateHazards(result) {
-  const alerts = [];
-  if (!state.settings?.hazardAlerts) return alerts;
-  const now = performance.now();
-  const seen = state.hazardAlertedAt;
-  // Prune long-gone tracks so the map cannot grow without bound.
-  for (const [key, at] of seen) {
-    if (now - at > HAZARD_REARM_MS * 4) seen.delete(key);
-  }
-  for (const rec of result?.records || []) {
-    if (!rec?.hazard) continue;
-    const key = `hazard-${rec.id}`;
-    const last = seen.get(key);
-    // `last` must be a real timestamp: treating "never alerted" as 0 would
-    // silence every hazard spotted in the first cool-down window after load.
-    if (last !== undefined && now - last < HAZARD_REARM_MS) continue;
-    seen.set(key, now);
-    alerts.push({ id: rec.id, kind: rec.hazard.kind, text: rec.hazard.note || rec.hazard.kind });
-  }
-  return alerts;
 }
 
 function hudState() {
@@ -580,16 +483,27 @@ function hudState() {
   };
 }
 
-/* ------------------------------------------------------------------ *
- * Wiring — deliberately almost nothing. The stage has no controls, so
- * the only listeners left are boot recovery and lifecycle hygiene.
+/** The only two lines of chrome: what is in view, and where it all happens. */
+function updateStatus() {
+  try {
+    const n = state.lastResult?.records?.length || 0;
+    const left = $('status-left');
+    const right = $('status-right');
+    const l = n ? `${n} ${n === 1 ? 'object' : 'objects'} recognised` : 'recognising';
+    if (left && left.textContent !== l) left.textContent = l;
+    if (right && right.textContent !== 'on-device · nothing leaves this phone') right.textContent = 'on-device · nothing leaves this phone';
+  } catch { /* status is cosmetic, never fatal */ }
+}
+
+/* ------------------------------------------------------------------ *\
+ * Wiring — deliberately almost nothing. The stage has no controls, so the
+ * only listeners left are boot recovery and lifecycle hygiene.
  * ------------------------------------------------------------------ */
 
 function bindUI() {
   // Boot-screen recovery: an honest, always-wired retry. A reload re-runs the
   // whole verified boot path, which is the only retry that can fix a wedged
-  // download or a permission prompt the browser has forgotten about. This
-  // listener lives on the boot card, outside the stage.
+  // download or a permission prompt the browser has forgotten about.
   $('boot-retry')?.addEventListener('click', () => { try { window.location.reload(); } catch { /* a sandboxed frame cannot reload */ } });
 
   document.addEventListener('visibilitychange', () => {
@@ -605,15 +519,12 @@ function bindUI() {
       state.wasStreaming = false;
       startCamera(state.facing)
         .then(() => log('camera: resumed'))
-        .catch((err) => {
-          log(`warn: camera resume failed — ${err.message}`);
-          state.hud?.toast('Camera resume failed — tap Retry on relaunch', 'warn');
-        });
+        .catch((err) => log(`warn: camera resume failed — ${err.message}`));
     }
   });
 }
 
-/* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *\
  * Demo feed (no camera: uses the bundled sample frame)
  * ------------------------------------------------------------------ */
 
@@ -660,7 +571,7 @@ function prepareDemoFrame() {
   }
 }
 
-/* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *\
  * Lifecycle helpers
  * ------------------------------------------------------------------ */
 
@@ -675,16 +586,7 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden) requestWakeLock();
 });
 
-function enableBySettings({ onProgress } = {}) {
-  const modules = [];
-  if (state.settings.moduleClassifier) modules.push('classifier');
-  if (state.settings.moduleOcr) modules.push('ocr');
-  if (state.settings.modulePose) modules.push('pose');
-  if (state.settings.moduleHands) modules.push('hands');
-  return state.pipeline.enableAll({ modules, onProgress: (pct, msg) => onProgress?.(pct, msg) });
-}
-
-/* ------------------------------------------------------------------ *
+/* ------------------------------------------------------------------ *\
  * Start
  * ------------------------------------------------------------------ */
 
@@ -718,4 +620,4 @@ function start() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
 else start();
 
-export { state, start, enterStage, maybeEnterStage, startDemo, evaluateHazards };
+export { state, start, enterStage, maybeEnterStage, startDemo };

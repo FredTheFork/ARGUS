@@ -1,25 +1,25 @@
 /**
- * ui.js — the v2.1 overlay: outlines and names drawn on the feed.
+ * ui.js — the overlay: what a high-end recognition camera draws.
  *
- * The HUD is drawn on a canvas over the camera feed at display refresh rate,
- * independently of inference, so brackets glide instead of stuttering at the
- * detector's 8 Hz. Every object in view gets corner brackets in its category
- * colour and its name; a hazard object is named in red. There is nothing to
- * tap, drag or type — the stage carries zero interactive elements — and the
- * only surface this class can raise by itself is the hazard toast.
+ * One thin rounded outline per object, one crisp label chip beside it:
+ * the name, its confidence, a quiet category dot, and — for people — a short
+ * posture/gesture word. Text read by OCR that sits on no object gets its own
+ * small quiet chip. Nothing else: no glow, no sweep, no radar. The overlay
+ * renders on the display clock (every animation frame) while inference runs
+ * on its own, so tags land the frame an object is first seen and glide as it
+ * moves instead of stepping at the detector's rate.
  *
- * The boot console survives unchanged: startup honesty (stages, progress,
- * failure headlines, retry) is what makes a control-free interface trustworthy.
+ * The boot console below is unchanged in spirit: startup honesty (stages,
+ * progress, failure headlines, retry) is what makes a control-free camera
+ * trustworthy.
  */
 
-import { categoryColour } from './config.js';
+import { categoryColour, titleCase, clamp } from './config.js';
 
 const $ = (id) => document.getElementById(id);
-const clamp01 = (v) => Math.min(1, Math.max(0, v));
-
-/* ------------------------------------------------------------------ *
- * HUD
- * ------------------------------------------------------------------ */
+const clamp01 = (v) => clamp(v, 0, 1);
+const FONT = `-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif`;
+const INK = '246, 249, 252';
 
 export class Hud {
   constructor({ canvas, video, getSettings } = {}) {
@@ -29,15 +29,12 @@ export class Hud {
     this.getSettings = getSettings;
     this.dpr = Math.min(2, window.devicePixelRatio || 1);
     this.lastFrame = null;
-    this._sweep = 0;
     this._toasts = [];
     this.resize();
     window.addEventListener('resize', () => this.resize());
     window.addEventListener('orientationchange', () => setTimeout(() => this.resize(), 250));
     requestAnimationFrame((t) => this._loop(t));
   }
-
-  get style() { return this.getSettings().hudStyle || 'standard'; }
 
   resize() {
     const { clientWidth: w, clientHeight: h } = this.canvas;
@@ -55,12 +52,11 @@ export class Hud {
     return { scale, offsetX: (this.width - dispW) / 2, offsetY: (this.height - dispH) / 2, dispW, dispH };
   }
 
-  /* ---------------------------------------------------------------- *
-   * Frame loop — the HUD renders every animation frame regardless of model rate
+  /* ---------------------------------------------------------------- *\
+   * Frame loop
    * ---------------------------------------------------------------- */
 
   _loop(t) {
-    this._sweep = t;
     // One bad frame must not stop the HUD: without this guard a single
     // exception here ends the requestAnimationFrame chain for good.
     try {
@@ -78,7 +74,6 @@ export class Hud {
     this.lastFrame = state;
     const ctx = this.ctx;
     const s = this.getSettings();
-    const scale = s.hudStyle === 'glasses' ? 1.35 : 1;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, this.width, this.height);
 
@@ -89,201 +84,160 @@ export class Hud {
     const px = (x) => (mirror ? this.width - (x * map.scale + map.offsetX) : x * map.scale + map.offsetX);
     const py = (y) => y * map.scale + map.offsetY;
 
-    const records = (state.records || []).filter((r) => r.box && !r.synthetic);
-    const drawable = records
-      .map((r) => ({ record: r, box: [px(r.box[0]), py(r.box[1]), px(r.box[2]), py(r.box[3])] }))
-      .sort((a, b) => (b.box[2] - b.box[0]) * (b.box[3] - b.box[1]) - (a.box[2] - a.box[0]) * (a.box[3] - a.box[1]));
-
-    const display = drawable.slice(0, 14);
-
-    // Pose skeletons and hands first, so brackets sit on top of them.
-    for (const { record } of display) {
-      if (record.pose) this._skeleton(ctx, record.pose, px, py);
-      if (record.hands) for (const hand of record.hands) this._hand(ctx, hand, px, py);
+    // Text read off the scene that sits on no tracked object: quiet chips.
+    for (const line of (state.texts || [])) {
+      if (line.attached) continue;
+      this._textChip(ctx, line, px, py);
     }
-    // Text regions from the OCR pass — outlined, with the words read aloud on
-    // the feed as they were found.
-    for (const line of (state.texts || [])) this._textBox(ctx, line, px, py, scale);
 
-    for (const { record, box } of display) {
-      this._bracket(ctx, record, box, scale);
-    }
+    // Objects: largest first, so small objects' labels sit on top.
+    const maxLabels = s.maxLabels || 16;
+    const drawable = (state.records || [])
+      .filter((r) => r.box)
+      .map((r) => ({ r, box: [px(r.box[0]), py(r.box[1]), px(r.box[2]), py(r.box[3])] }))
+      .sort((a, b) => (b.box[2] - b.box[0]) * (b.box[3] - b.box[1]) - (a.box[2] - a.box[0]) * (a.box[3] - a.box[1]))
+      .slice(0, maxLabels);
+    for (const { r, box } of drawable) this._tag(ctx, r, box, s);
   }
 
-  /* ---------------------------------------------------------------- *
+  /* ---------------------------------------------------------------- *\
    * Elements
    * ---------------------------------------------------------------- */
 
   /**
-   * Corner brackets in the category colour, the object's name beside them.
-   * The outline lands the first frame the object is tracked — no dwell, no
-   * confirmation, no tap: if the detector names it, the feed says it.
+   * The whole tag: one thin rounded outline and one chip with the name,
+   * confidence and — for people — the posture word. A new object fades in
+   * over a few frames; that is all the animation there is.
    */
-  _bracket(ctx, record, box, scale) {
-    const colour = categoryColour(record.category) || '#c9d4e4';
+  _tag(ctx, record, box, s) {
     const x = Math.min(box[0], box[2]);
     const y = Math.min(box[1], box[3]);
     const w = Math.abs(box[2] - box[0]);
     const h = Math.abs(box[3] - box[1]);
-    const len = Math.max(8, Math.min(26, Math.min(w, h) * 0.28));
+    // First frame is already visible (15 %); full strength after a short
+    // fade-in. The tag must never appear to lag the object.
+    const alpha = clamp01(0.15 + 0.85 * ((record.age ?? 0) / (s.labelFadeMs || 160)));
+    const rise = (1 - alpha) * 4;
 
     ctx.save();
-    ctx.strokeStyle = colour;
-    ctx.lineWidth = 1.5 * (this.style === 'glasses' ? 1.35 : 1);
-    ctx.shadowColor = colour;
-    ctx.shadowBlur = 4;
-    const segs = [
-      [[x, y + len], [x, y], [x + len, y]],
-      [[x + w - len, y], [x + w, y], [x + w, y + len]],
-      [[x + w, y + h - len], [x + w, y + h], [x + w - len, y + h]],
-      [[x + len, y + h], [x, y + h], [x, y + h - len]]
-    ];
-    for (const seg of segs) {
-      ctx.beginPath();
-      ctx.moveTo(seg[0][0], seg[0][1]);
-      ctx.lineTo(seg[1][0], seg[1][1]);
-      ctx.lineTo(seg[2][0], seg[2][1]);
-      ctx.stroke();
-    }
-    ctx.shadowBlur = 0;
+    ctx.globalAlpha = alpha;
 
-    const label = String(record.label || record.noun || record.cls || 'object').toUpperCase();
-    const hazard = record.hazard ? (record.hazard.note || record.hazard.kind || 'hazard').toUpperCase() : null;
+    // Outline: a dark under-stroke for contrast on bright scenes, then the
+    // thin light line on top.
+    const r = Math.min(5, w / 4, h / 4);
+    ctx.lineJoin = 'round';
+    this._rr(ctx, x, y + rise, w, h, r);
+    ctx.strokeStyle = 'rgba(5, 8, 11, 0.55)';
+    ctx.lineWidth = 3.5;
+    ctx.stroke();
+    this._rr(ctx, x, y + rise, w, h, r);
+    ctx.strokeStyle = `rgba(${INK}, 0.95)`;
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
 
-    const fontTitle = 11.5 * (this.style === 'glasses' ? 1.25 : 1);
-    const fontBody = 10 * (this.style === 'glasses' ? 1.3 : 1);
-    ctx.textBaseline = 'top';
-    ctx.font = `600 ${fontTitle}px ui-monospace, monospace`;
-    const widest = Math.max(
-      ctx.measureText(label).width,
-      hazard ? (ctx.font = `600 ${fontBody}px ui-monospace, monospace`, ctx.measureText(hazard).width) : 0
-    );
-    const padX = 7;
-    const lineH = fontTitle + 4;
-    const lines = hazard ? 2 : 1;
-    const boxW = widest + padX * 2;
-    const boxH = lines * lineH + 6;
+    // Chip
+    const label = titleCase(record.label || record.noun || record.cls || 'Object');
+    const conf = Math.round((record.confidence || 0) * 100);
+    const sub = record.category === 'person' && record.activity?.label
+      ? titleCase(record.activity.label)
+      : null;
+
+    const fMain = `600 12.5px ${FONT}`;
+    const fSmall = `500 10.5px ${FONT}`;
+    const fSub = `400 10.5px ${FONT}`;
+
+    ctx.font = fMain;
+    const labelW = ctx.measureText(label).width;
+    ctx.font = fSmall;
+    const confW = ctx.measureText(`${conf}%`).width;
+    ctx.font = fSub;
+    const subW = sub ? ctx.measureText(sub).width : 0;
+
+    const padX = 9;
+    const dot = 5;
+    const gap = 6;
+    const line1W = dot + gap + labelW + gap + confW;
+    const chipW = Math.max(line1W, subW) + padX * 2;
+    const chipH = sub ? 38 : 25;
     let bx = x;
-    let by = y - boxH - 6;
-    if (by < 4) by = y + h + 6;
-    if (bx + boxW > this.width - 4) bx = this.width - 4 - boxW;
-    bx = Math.max(2, bx);
+    let by = y + rise - chipH - 7;
+    if (by < 4) by = y + h + rise + 7;
+    if (bx + chipW > this.width - 4) bx = this.width - 4 - chipW;
+    bx = Math.max(4, bx);
 
-    ctx.fillStyle = 'rgba(2,6,12,.62)';
-    ctx.fillRect(bx, by, boxW, boxH);
-    ctx.strokeStyle = colour;
+    ctx.fillStyle = 'rgba(7, 10, 14, 0.74)';
+    this._rr(ctx, bx, by, chipW, chipH, 7);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
     ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(bx, by);
-    ctx.lineTo(bx + boxW, by);
+    this._rr(ctx, bx, by, chipW, chipH, 7);
     ctx.stroke();
 
-    ctx.font = `600 ${fontTitle}px ui-monospace, monospace`;
-    ctx.fillStyle = hazard ? '#ff5b5b' : colour;
-    ctx.fillText(label, bx + padX, by + 4);
-    if (hazard) {
-      ctx.font = `600 ${fontBody}px ui-monospace, monospace`;
-      ctx.fillText(hazard, bx + padX, by + 4 + lineH);
-    }
-    ctx.restore();
-  }
-
-  _skeleton(ctx, kpts, px, py) {
-    ctx.save();
-    ctx.strokeStyle = 'rgba(76,224,255,.85)';
-    ctx.lineWidth = 2;
-    ctx.shadowColor = 'rgba(76,224,255,.6)';
-    ctx.shadowBlur = 6;
-    const pairs = [
-      ['left shoulder', 'right shoulder'], ['left shoulder', 'left elbow'], ['left elbow', 'left wrist'],
-      ['right shoulder', 'right elbow'], ['right elbow', 'right wrist'], ['left shoulder', 'left hip'],
-      ['right shoulder', 'right hip'], ['left hip', 'right hip'], ['left hip', 'left knee'],
-      ['left knee', 'left ankle'], ['right hip', 'right knee'], ['right knee', 'right ankle']
-    ];
-    const find = (name) => kpts.find((k) => k.name === name && k.c > 0.3);
-    for (const [a, b] of pairs) {
-      const ka = find(a); const kb = find(b);
-      if (!ka || !kb) continue;
-      ctx.beginPath();
-      ctx.moveTo(px(ka.x), py(ka.y));
-      ctx.lineTo(px(kb.x), py(kb.y));
-      ctx.stroke();
-    }
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = 'rgba(255,255,255,.9)';
-    for (const k of kpts) {
-      if (k.c < 0.3) continue;
-      ctx.beginPath();
-      ctx.arc(px(k.x), py(k.y), 2.4, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.restore();
-  }
-
-  _hand(ctx, hand, px, py) {
-    ctx.save();
-    ctx.strokeStyle = 'rgba(125,255,155,.9)';
-    ctx.fillStyle = 'rgba(125,255,155,.9)';
-    ctx.lineWidth = 1.6;
-    const chains = [[0, 1, 2, 3, 4], [0, 5, 6, 7, 8], [0, 9, 10, 11, 12], [0, 13, 14, 15, 16], [0, 17, 18, 19, 20]];
-    for (const chain of chains) {
-      ctx.beginPath();
-      for (let i = 0; i < chain.length; i++) {
-        const k = hand.kpts[chain[i]];
-        if (!k) continue;
-        const x = px(k.x);
-        const y = py(k.y);
-        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-      }
-      ctx.stroke();
-    }
-    for (const k of hand.kpts) {
-      ctx.beginPath();
-      ctx.arc(px(k.x), py(k.y), 1.8, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    if (hand.gesture?.name && hand.gesture.name !== 'hand' && hand.gesture.confidence > 0.6) {
-      ctx.font = '600 10px ui-monospace, monospace';
-      ctx.fillText(hand.gesture.name.toUpperCase(), px(hand.kpts[0].x), py(hand.kpts[0].y) - 8);
-    }
-    ctx.restore();
-  }
-
-  _textBox(ctx, line, px, py, scale) {
-    const q = line.quad;
-    if (!q) return;
-    ctx.save();
-    ctx.strokeStyle = line.sign ? 'rgba(255,140,140,.75)' : 'rgba(180,220,255,.4)';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([3, 3]);
+    // category dot
+    const dotColour = categoryColour(record.category) || '#c3cedd';
+    ctx.fillStyle = dotColour;
     ctx.beginPath();
-    ctx.moveTo(px(q[0][0]), py(q[0][1]));
-    for (let i = 1; i < q.length; i++) ctx.lineTo(px(q[i][0]), py(q[i][1]));
-    ctx.lineTo(px(q[0][0]), py(q[0][1]));
-    ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.font = `400 ${9.5 * scale}px ui-monospace, monospace`;
-    ctx.fillStyle = 'rgba(223,246,255,.85)';
-    const x = px(q[0][0]);
-    const y = py(q[0][1]) - 3;
-    ctx.fillText(line.text, x, y);
+    const dotY = sub ? by + 11 : by + chipH / 2;
+    ctx.arc(bx + padX + dot / 2, dotY, dot / 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    // main line
+    ctx.textBaseline = 'middle';
+    ctx.font = fMain;
+    ctx.fillStyle = `rgba(${INK}, 0.97)`;
+    ctx.fillText(label, bx + padX + dot + gap, sub ? by + 11 : dotY);
+    ctx.font = fSmall;
+    ctx.fillStyle = `rgba(${INK}, 0.58)`;
+    ctx.fillText(`${conf}%`, bx + padX + dot + gap + labelW + gap, sub ? by + 11 : dotY);
+
+    if (sub) {
+      ctx.font = fSub;
+      ctx.fillStyle = `rgba(${INK}, 0.55)`;
+      ctx.fillText(sub, bx + padX, by + 26);
+    }
+
     ctx.restore();
   }
 
-  /* ---------------------------------------------------------------- *
-   * Imperative bits — the hazard toast is the only proactive surface
+  /** A quiet chip for text the OCR read that does not belong to any object. */
+  _textChip(ctx, line, px, py) {
+    const text = String(line.text || '').slice(0, 26) + (String(line.text || '').length > 26 ? '…' : '');
+    if (!text) return;
+    const [x1, y1] = [px(line.box[0]), py(line.box[1])];
+    ctx.save();
+    ctx.globalAlpha = 0.92;
+    ctx.font = `400 10.5px ${FONT}`;
+    const w = ctx.measureText(text).width + 14;
+    const h = 19;
+    let bx = x1;
+    let by = y1 - h - 5;
+    if (by < 4) by = y1 + 5;
+    if (bx + w > this.width - 4) bx = this.width - 4 - w;
+    bx = Math.max(4, bx);
+    ctx.fillStyle = 'rgba(7, 10, 14, 0.6)';
+    this._rr(ctx, bx, by, w, h, 6);
+    ctx.fill();
+    ctx.fillStyle = `rgba(${INK}, 0.8)`;
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, bx + 7, by + h / 2 + 0.5);
+    ctx.restore();
+  }
+
+  /** Rounded-rect path without relying on the newer roundRect API. */
+  _rr(ctx, x, y, w, h, r) {
+    const rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+  }
+
+  /* ---------------------------------------------------------------- *\
+   * Boot console
    * ---------------------------------------------------------------- */
-
-  toast(text, kind = 'info', ttl = 2600) {
-    const el = document.createElement('div');
-    el.className = `toast ${kind}`;
-    el.textContent = text;
-    $('toasts')?.appendChild(el);
-    setTimeout(() => el.remove(), ttl);
-    if (navigator.vibrate && this.getSettings().haptics) navigator.vibrate(kind === 'alert' ? [30, 40, 30] : 18);
-  }
-
-  /* boot console ---------------------------------------------------- */
 
   bootLine(text, kind = '') {
     const box = $('boot-lines');
@@ -292,6 +246,7 @@ export class Hud {
     line.textContent = text;
     if (kind) line.className = kind;
     box.appendChild(line);
+    while (box.children.length > 8) box.removeChild(box.children[0]);
     box.scrollTop = box.scrollHeight;
   }
 
@@ -303,8 +258,6 @@ export class Hud {
     if (stage) stage.textContent = text;
     const bar = $('boot-pct');
     if (bar) bar.style.width = `${Math.round(clamp01(pct) * 100)}%`;
-    const ring = $('boot-ring-fg');
-    if (ring) ring.style.strokeDashoffset = String(327 * (1 - clamp01(pct)));
   }
 
   bootReady(detail = '') {

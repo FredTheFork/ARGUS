@@ -1,45 +1,37 @@
 /**
  * pipeline.js — perception orchestration and evidence fusion.
  *
- * One frame in, a set of object records out. Each record is the union of every
- * piece of evidence the modules produced about one tracked object, resolved into
- * a single honest statement:
+ * One frame in, a set of object records out. Each record is one honest answer
+ * to "what is that":
  *
- *   { label: 'Apple iPhone', noun: 'phone', confidence: 0.86, source: 'brand',
- *     attributes: { colour: {...}, material: {...}, pattern, shape },
- *     distance: { metres: 0.9, bearing: -6 }, text: 'iPhone 15 Pro',
- *     hazard: null, tier: 3, motion: {...} }
+ *   { label: 'Samsung phone', category: 'device', confidence: 0.86,
+ *     source: 'brand', box: [...], text: 'Galaxy S24', brand: {...},
+ *     posture: 'standing', activity: { id: 'standing', label: 'standing' } }
  *
- * Two clocks run here. Detection, tracking, colour/material attributes and the
- * classifier are *in the frame*: they are cheap enough (tens of milliseconds)
- * and everything downstream — narration, the lock, the HUD — needs them now.
- * OCR and pose are *behind* the frame: they cost 100-600 ms each, so they run
- * as background jobs and their results are attached to the next frame's records
- * by geometry. A worn assistant that stutters to read a sign is worse than one
- * that reads the sign a third of a second late.
+ * Two clocks run here. Detection and the classifier are *in the frame*: they
+ * are cheap enough (tens of milliseconds) and the overlay needs them now — the
+ * first tag must land on the first frame. OCR and pose are *behind* the frame:
+ * they cost 100-600 ms each, so they run as background jobs and their results
+ * attach to the next frame's records by geometry. A camera that stutters to
+ * read a sign is worse than one that reads the sign a third of a second late.
  *
- * The fusion rules matter more than any single model. A detector saying "phone",
- * a classifier saying "iPod" and OCR reading "iPhone" should produce one answer,
- * not three: brand text read off the object wins (it is printed on the thing
- * itself), then a confident classifier answer compatible with the detected
- * class, then the detected class, then a taught example — which is user-asserted
- * ground truth and therefore outranks everything.
+ * The fusion rules matter more than any single model. A detector saying
+ * "phone", a classifier saying "iPod" and OCR reading "Samsung" produce one
+ * answer, not three: brand text read off the object wins (it is printed on the
+ * thing itself), then a confident classifier answer compatible with the
+ * detected class, then the detected class.
  */
 
 import { Detector } from './detector.js';
-import { Classifier, TeachStore, refineFromClassifier } from './classify.js';
+import { Classifier, refineFromClassifier } from './classify.js';
 import { Ocr } from './ocr.js';
 import { Pose, activityOf } from './pose.js';
-import { analyseAppearance, estimateRange, lightingOf, inferScene } from './attributes.js';
 import { Tracker } from './tracker.js';
-import { Rolling, clamp, iou } from './core.js';
+import { Rolling, clamp, iou, nms, boxArea } from './core.js';
 import {
-  lookup, nameFor, tierOf, tagsFor, noteFor, heightFor, matchBrand,
-  displayName, categoryOf
+  lookup, nameFor, tierOf, matchBrand, displayName, categoryOf
 } from './kb.js';
 import { COCO_META } from './config.js';
-
-const BG = { IDLE: 'idle', OCR: 'ocr', POSE: 'pose' };
 
 export class Pipeline {
   constructor({ runtime, settings, onLog = () => {}, onStatus = () => {} } = {}) {
@@ -55,30 +47,25 @@ export class Pipeline {
     this.tracker = new Tracker({
       iouThreshold: 0.24,
       maxAge: settings.trackMaxAge || 1400,
-      smooth: settings.appearanceSmoothing || 0.55
+      smooth: settings.trackSmooth || 0.55
     });
-    this.teach = new TeachStore();
 
-    this.timers = { detect: 0, classify: 0, ocr: 0, pose: 0, hands: 0, attributes: 0, scene: 0 };
+    this.timers = { detect: 0, ocr: 0, pose: 0, hands: 0 };
     this.latency = new Rolling(24);
+    this._frameMs = new Rolling(12);          // full-frame-only detector time
     this.scanSize = Number(settings.scanSize) || 416;
     this.lastRecords = [];
     this.lastTexts = [];
-    this.lastBrands = [];
-    this.lastScene = null;
-    this.lastLighting = null;
     this.lastInferMs = 0;
-    this.stats = {
-      frames: 0, detections: 0, classifications: 0, ocrRuns: 0, poseRuns: 0,
-      frameMs: 0, dropped: 0, bgOcrPending: false, bgPosePending: false
-    };
-    this._clsBudget = 0;
-    this._live = [];
-    this._born = [];
-    this._lost = [];
+    this._textCache = new Map();
+    this._bgOcr = false;
+    this._bgPose = false;
+    this._bgHands = false;
+    this._running = false;
+    this.stats = { frames: 0, detections: 0, classifications: 0, ocrRuns: 0, poseRuns: 0, frameMs: 0 };
   }
 
-  /* ---------------------------------------------------------------- *
+  /* ---------------------------------------------------------------- *\
    * Module lifecycle
    * ---------------------------------------------------------------- */
 
@@ -92,6 +79,7 @@ export class Pipeline {
     };
   }
 
+  /** The detector is the core: without it there is no app. */
   async loadCore({ onProgress = () => {} } = {}) {
     await this.detector.load({ onProgress });
     this.onStatus('detector', 'ready');
@@ -118,17 +106,18 @@ export class Pipeline {
     return true;
   }
 
+  /** Optional modules never hold up first light: failures are logged, not thrown. */
   async enableAll({ onProgress = () => {}, modules = null } = {}) {
-    const wanted = modules || ['classifier', 'ocr', 'pose'];
+    const wanted = modules || ['classifier', 'ocr', 'pose', 'hands'];
     const done = [];
     for (const m of wanted) {
       try { await this.enable(m, { onProgress }); done.push(m); }
-      catch (err) { this.onLog(`warn: ${m} failed — ${err.message}`); }
+      catch (err) { this.onLog(`warn: ${m} failed to load — ${err.message}`); }
     }
     return done;
   }
 
-  /* ---------------------------------------------------------------- *
+  /* ---------------------------------------------------------------- *\
    * Frame
    * ---------------------------------------------------------------- */
 
@@ -138,52 +127,66 @@ export class Pipeline {
    * @param {object} opts      { time }
    */
   async processFrame(frame, { time = performance.now() } = {}) {
-    if (this._running) { this.stats.dropped++; return this.snapshot(); }
+    if (this._running) return this.snapshot();
     this._running = true;
     const started = performance.now();
     this.stats.frames++;
 
     try {
-      /* --- 1. detect ------------------------------------------------- */
+      /* --- 1. detect -------------------------------------------------
+       * Always the full frame first: that is the instant path. On a device
+       * that keeps it fast, 2×2 overlapping tiles run on top so small objects
+       * (a plug socket, a key, a label) survive — the tile pass only happens
+       * when the full frame stays inside its budget, so a slow phone never
+       * pays for it. */
+      const s = this.settings;
       const dets = await this.detector.detect(frame, {
         size: this.scanSize,
-        minScore: this.settings.minConfidence,
-        tiles: this._tileMode(),
-        maxDetections: this.settings.maxDetections
+        minScore: s.minConfidence,
+        tiles: 'off',
+        maxDetections: s.maxDetections
       });
-      const delay = performance.now() - time;
+      const frameMs = this.detector.lastInferMs;
+      this._frameMs.push(frameMs);
+      let all = dets;
+      const tiles = this._tileMode();
+      if (tiles) {
+        try {
+          const tiled = await this.detector.detectTiles(frame, {
+            size: this.scanSize,
+            minScore: s.minConfidence,
+            target: tiles,
+            maxDetections: s.maxDetections
+          });
+          if (tiled.length) all = nms([...dets, ...tiled], 0.5, 'class').slice(0, s.maxDetections * 2);
+        } catch (err) {
+          this.onLog(`warn: tile pass failed — ${err.message}`);
+        }
+      }
       this.lastInferMs = Math.round(performance.now() - started);
       this.latency.push(this.lastInferMs);
-      this._adaptScan(this.lastInferMs - delay);
+      this._adaptScan(frameMs);
       this.timers.detect = time;
-      this.stats.detections += dets.length;
+      this.stats.detections += all.length;
 
-      const prepared = dets.map((d) => this._prepareDetection(d));
-      const { live, born, lost } = this.tracker.update(prepared, time);
-      this._live = live;
-      this._born = born;
-      this._lost = lost;
+      const prepared = all.map((d) => this._prepareDetection(d));
+      const { live } = this.tracker.update(prepared, time);
 
       /* --- 2. attach background evidence from the previous pass ------- */
-      this._attachText();
-      this._attachPose();
+      for (const line of this.lastTexts) line.attached = false;
+      this._attachText(frame, time);
+      this._attachPose(time);
 
-      /* --- 3. per-object evidence (in frame) -------------------------- */
-      this._clsBudget = 2;
+      /* --- 3. classifier refinement (in frame, budgeted) -------------- */
+      this._clsBudget = s.classifyBudget || 2;
       const records = [];
       for (const track of live) {
-        this._attributes(track, frame);
         await this._classify(track, frame, time);
-        this._range(track, frame);
         records.push(this._record(track, time));
       }
 
-      /* --- 4. spatial relations --------------------------------------- */
-      this._relations(records, frame);
-
-      /* --- 5. schedule background jobs -------------------------------- */
-      this._scheduleBackground(frame, records, time);
-      this._sceneCache(records, time);
+      /* --- 4. schedule background jobs -------------------------------- */
+      this._scheduleBackground(frame, live, time);
 
       this.lastRecords = records;
       this.stats.frameMs = Math.round(performance.now() - started);
@@ -197,32 +200,32 @@ export class Pipeline {
     return {
       records: this.lastRecords,
       texts: this.lastTexts,
-      scene: this.lastScene,
-      lighting: this.lastLighting,
-      born: this._born,
-      lost: this._lost,
       timing: { detect: this.lastInferMs, frame: this.stats.frameMs },
       scanSize: this.scanSize
     };
   }
 
+  /** 'auto' → 2×2 tiles only while the full frame stays fast. */
   _tileMode() {
     const mode = this.settings.detailMode;
-    if (mode === 'auto') return 'auto';
-    if (mode === '4' || mode === '9') return mode;
-    return 'off';
+    if (mode === '4') return 2;
+    if (mode === '9') return 3;
+    if (mode === 'auto') {
+      const n = this._frameMs.items.length;
+      return n >= 3 && this._frameMs.mean < (this.settings.tileBudgetMs || 90) ? 2 : null;
+    }
+    return null;
   }
 
-  /** Detector throughput governor: keep inference inside ~70 ms. */
+  /** Detector throughput governor: keep the full frame inside ~110 ms. */
   _adaptScan(ms) {
-    if (!this.settings.adaptive) return;
     const ceiling = Number(this.settings.scanSize) || 416;
-    const floor = 320;
+    const floor = Number(this.settings.scanFloor) || 320;
     if (ms > 110 && this.scanSize > floor) this.scanSize = Math.max(floor, this.scanSize - 32);
     else if (ms < 55 && this.scanSize < ceiling) this.scanSize = Math.min(ceiling, this.scanSize + 32);
   }
 
-  /** Map a raw detection into ARGUS vocabulary and attach its KB record. */
+  /** Map a raw detection into ARGUS vocabulary. */
   _prepareDetection(det) {
     const [name, category] = COCO_META[det.cls] || [det.cls, categoryOf(det.cls)];
     const rec = lookup(name, { fuzzy: false });
@@ -235,137 +238,70 @@ export class Pipeline {
     };
   }
 
-  /* ---------------------------------------------------------------- *
-   * In-frame stages
+  /* ---------------------------------------------------------------- *\
+   * In-frame stage
    * ---------------------------------------------------------------- */
 
   /**
-   * Colour and material read, with temporal voting.
-   *
-   * A single frame of a glossy object flashes between "black" and "silver"
-   * depending on where the highlight falls, so each object keeps a short vote
-   * tally and the stable winner is what gets reported. The newest read still
-   * supplies the palette and cues — only the *name* is voted on.
+   * Refine the detector's answer with the 1000-class classifier. New tracks
+   * are classified on their first pass (budget permitting); established ones
+   * refresh at the configured cadence.
    */
-  _attributes(track, frame) {
-    const now = performance.now();
-    const cadence = this.settings.attributesEvery ?? 900;
-    if (track.attributes && now - (track.attrAt || 0) < cadence) return;
-    const appearance = analyseAppearance(frame, track.box, { cls: track.label || track.cls, maxSize: 96 });
-    if (!appearance) return;
-    track.attrAt = now;
-
-    const votes = track.attrVotes || (track.attrVotes = { colour: new Map(), material: new Map(), pattern: new Map(), finish: new Map(), n: 0 });
-    votes.n++;
-    const tally = (map, key, weight = 1) => {
-      if (!key) return;
-      const cur = map.get(key) || 0;
-      map.set(key, cur * 0.72 + weight);
-      if (map.size > 6) {
-        // forget the weakest reading so the vote can change its mind
-        const weakest = [...map.entries()].sort((a, b) => a[1] - b[1])[0];
-        if (weakest) map.delete(weakest[0]);
-      }
-    };
-    tally(votes.colour, appearance.colour?.name);
-    tally(votes.material, appearance.material?.name, appearance.material?.confidence || 0);
-    tally(votes.pattern, appearance.pattern?.id);
-    tally(votes.finish, appearance.finish);
-
-    const winner = (map, fallback) => {
-      if (!map.size) return fallback;
-      return [...map.entries()].sort((a, b) => b[1] - a[1])[0][0];
-    };
-    const colourName = winner(votes.colour, appearance.colour?.name);
-    const materialName = winner(votes.material, appearance.material?.name);
-
-    // Material score is averaged over the votes for that material, so a single
-    // lucky frame cannot promote an implausible one.
-    const materials = (appearance.materials || []).map((m) => ({ ...m }));
-    if (materialName && !materials.some((m) => m.name === materialName)) {
-      materials.unshift({ name: materialName, score: appearance.material?.confidence || 0.3 });
-    }
-
-    track.attributes = {
-      ...appearance,
-      colour: { ...appearance.colour, name: colourName, stable: votes.n > 2 },
-      material: materialName ? { name: materialName, confidence: appearance.material?.confidence || 0.3 } : appearance.material,
-      materials,
-      pattern: { ...(appearance.pattern || {}), id: winner(votes.pattern, appearance.pattern?.id) },
-      finish: winner(votes.finish, appearance.finish),
-      samples: votes.n
-    };
-  }
-
   async _classify(track, frame, time) {
     const s = this.settings;
-    if (!this.classifier.ready || !s.moduleClassifier) return;
+    if (!this.classifier.ready) return;
+    if (this._clsBudget <= 0) return;
     const area = (track.box[2] - track.box[0]) * (track.box[3] - track.box[1]);
-    if (area < frame.width * frame.height * 0.002) return;      // too small to hold detail
-    const due = time - (track.lastClassified || 0) > (s.classifyEvery || 700);
-    if (!due && track.classifier) return;
-    if (this._clsBudget <= 0 && track.classifier) return;
-    track.lastClassified = time;
+    if (area < frame.width * frame.height * (s.classifyMinArea || 0.002)) return;
+    const due = !track.classifier || time - (track.lastClassified || 0) > (s.classifyEvery || 500);
+    if (!due) return;
     this._clsBudget--;
+    track.lastClassified = time;
     const crop = this._crop(frame, track.box, 0.08);
     if (!crop) return;
     try {
-      const result = await this.classifier.classify(crop, { topK: s.classifyTopK, embed: true });
+      const result = await this.classifier.classify(crop, { topK: s.classifyTopK || 5, embed: false });
       this.stats.classifications++;
       if (!result.top.length) return;
       track.classifier = result.top;
-      if (result.embedding) track.embedding = result.embedding;
       const refined = refineFromClassifier(track.label || track.cls, result.top);
-      if (refined.refined) { track.refined = refined.refined; track.refineConfidence = refined.confidence; }
-      const taught = Classifier.matchTaught(track.embedding, this.teach, { minScore: s.teachThreshold });
-      if (taught) { track.taught = taught; track.tier = Math.max(track.tier || 1, 3); }
-      else if (track.taught && track.taught.label) { track.taught = null; }
+      if (refined.refined) {
+        track.refined = refined.refined;
+        track.refineConfidence = refined.confidence;
+      } else {
+        track.refined = null;
+        track.refineConfidence = 0;
+      }
     } catch (err) {
       this.onLog(`warn: classifier pass failed — ${err.message}`);
     }
   }
 
-  _range(track, frame) {
-    const s = this.settings;
-    if (!s.showDistance && !s.narrateDistance) return;
-    const prior = heightFor(track.refined || track.label || track.cls) || heightFor(track.cls);
-    const est = estimateRange({
-      box: track.box,
-      frameWidth: frame.width,
-      frameHeight: frame.height,
-      fovDeg: s.fovHorizontal,
-      heightPrior: prior,
-      personKpts: track.pose || null
-    });
-    if (est) track.distance = est;
-  }
-
-  /* ---------------------------------------------------------------- *
+  /* ---------------------------------------------------------------- *\
    * Background jobs (never block a frame)
    * ---------------------------------------------------------------- */
 
-  _scheduleBackground(frame, records, time) {
+  _scheduleBackground(frame, live, time) {
     const s = this.settings;
 
-    if (s.moduleOcr && this.ocr.ready && !this._bgOcr && time - this.timers.ocr > (s.ocrEvery || 2200)) {
+    if (this.ocr.ready && !this._bgOcr && time - this.timers.ocr > (s.ocrEvery || 1600)) {
       this._bgOcr = true;
-      this.stats.bgOcrPending = true;
       this.timers.ocr = time;
       Promise.resolve()
-        .then(() => this.ocr.read(frame, { minConfidence: s.ocrMinConfidence, maxLines: 20 }))
+        .then(() => this.ocr.read(frame, { minConfidence: s.ocrMinConfidence, maxLines: s.ocrMaxLines }))
         .then((out) => {
           this.stats.ocrRuns++;
-          this.lastTexts = out.lines || [];
+          this._recordTexts(out.lines, time);
         })
         .catch((err) => this.onLog(`warn: OCR pass failed — ${err.message}`))
-        .finally(() => { this._bgOcr = false; this.stats.bgOcrPending = false; });
+        .finally(() => { this._bgOcr = false; });
     }
 
-    if (s.modulePose && this.pose.bodyReady && !this._bgPose && time - this.timers.pose > (s.poseEvery || 550)) {
+    // Pose only runs while a person is actually in view.
+    const people = live.filter((t) => t.cls === 'person' || t.category === 'person');
+    if (this.pose.bodyReady && people.length && !this._bgPose && time - this.timers.pose > (s.poseEvery || 550)) {
       this._bgPose = true;
-      this.stats.bgPosePending = true;
       this.timers.pose = time;
-      const people = records.filter((r) => r.category === 'person').map((r) => ({ id: r.id, box: r.box }));
       Promise.resolve()
         .then(() => this.pose.detectBodies(frame, { minScore: 0.35 }))
         .then((bodies) => {
@@ -380,10 +316,10 @@ export class Pipeline {
           });
         })
         .catch((err) => this.onLog(`warn: pose pass failed — ${err.message}`))
-        .finally(() => { this._bgPose = false; this.stats.bgPosePending = false; });
+        .finally(() => { this._bgPose = false; });
     }
 
-    if (s.moduleHands && this.pose.handReady && this.lastPoses?.length && !this._bgHands && time - this.timers.hands > (s.handEvery || 700)) {
+    if (this.pose.handReady && this.lastPoses?.length && !this._bgHands && time - this.timers.hands > (s.handEvery || 700)) {
       this._bgHands = true;
       this.timers.hands = time;
       const wrists = [];
@@ -400,27 +336,35 @@ export class Pipeline {
         .catch(() => { /* gestures are a bonus, never an error */ })
         .finally(() => { this._bgHands = false; });
     }
-
-    // Frame-level colour and lighting statistics are cheap and help the scene read.
-    if (!this._bgLight && time - this.timers.scene > 1500) {
-      this.timers.scene = time;
-      this._bgLight = true;
-      Promise.resolve()
-        .then(() => lightingOf(frame))
-        .then((light) => { this.lastLighting = light; })
-        .catch(() => {})
-        .finally(() => { this._bgLight = false; });
-    }
   }
 
-  /** Attach OCR lines to the records they sit on. */
-  _attachText() {
-    if (!this.lastTexts?.length || !this.lastRecords.length) return;
+  /**
+   * OCR lines are kept for ~4 s after last seen, so text chips do not flicker
+   * between the 1.6 s OCR passes. A line sits on a track when it overlaps it;
+   * on a track it becomes part of the object's name (brand / sign), and only
+   * lines that sit on no object are drawn as their own quiet chip.
+   */
+  _recordTexts(lines, time) {
+    for (const line of lines) {
+      const key = `${Math.round(line.box[0] / 8)},${Math.round(line.box[1] / 8)}|${line.text.slice(0, 24)}`;
+      const prev = this._textCache.get(key);
+      if (prev) { prev.line = line; prev.seenAt = time; }
+      else this._textCache.set(key, { line, seenAt: time });
+    }
+    for (const [key, entry] of this._textCache) {
+      if (time - entry.seenAt > 4000) this._textCache.delete(key);
+    }
+    this.lastTexts = [...this._textCache.values()].map((e) => e.line);
+  }
+
+  /** Attach OCR lines to the tracks they sit on. */
+  _attachText(frame, time) {
+    if (!this.lastTexts.length) return;
+    const frameArea = frame.width * frame.height || 1;
     for (const track of this.tracker.tracks) {
       if (!track.text) continue;
-      // Clear stale text: a label read three seconds ago on this track is still
-      // valid, but text from a previous track of the same box is not.
-      if (performance.now() - (track.textAt || 0) > 8000) { track.text = null; track.brand = null; track.sign = null; }
+      // Text read a long time ago on this track is stale; drop it.
+      if (time - (track.textAt || 0) > 8000) { track.text = null; track.brand = null; track.sign = null; }
     }
     for (const line of this.lastTexts) {
       let best = null; let bestScore = 0;
@@ -432,16 +376,26 @@ export class Pipeline {
         if (score > bestScore) { bestScore = score; best = track; }
       }
       if (best && bestScore > 0.12) {
-        if (best.text !== line.text) { best.text = line.text; best.textAt = performance.now(); }
+        line.attached = true;
+        if (best.text !== line.text) { best.text = line.text; best.textAt = time; }
         if (line.brand) best.brand = line.brand;
-        if (line.sign) best.sign = line.sign;
+        if (line.sign) {
+          best.sign = line.sign;
+          best.signRatio = boxArea(line.box) / frameArea;
+        }
       }
     }
-    this.lastBrands = [...new Set(this.lastTexts.filter((l) => l.brand).map((l) => l.brand.name))];
   }
 
-  /** Attach pose, posture and gesture evidence to the person tracks. */
+  /** Attach posture and gesture evidence to the person tracks. */
   _attachPose() {
+    for (const track of this.tracker.tracks) {
+      track.pose = null;
+      track.posture = null;
+      track.activity = null;
+      track.hands = null;
+      track.gesture = null;
+    }
     if (!this.lastPoses?.length) return;
     for (const p of this.lastPoses) {
       const track = p.id != null ? this.tracker.tracks.find((t) => t.id === p.id) : null;
@@ -456,139 +410,59 @@ export class Pipeline {
         || this.tracker.tracks.find((t) => (t.category === 'person' || t.cls === 'person') && iou(t.box, hand.box) > 0.05);
       if (!track) continue;
       track.hands = [hand];
+      track.gesture = hand.gesture?.name || null;
     }
     for (const track of this.tracker.tracks) {
       if (!track.pose) continue;
       track.activity = activityOf({ kpts: track.pose, posture: track.posture }, track.hands || []);
-      // Pose keypoints measure a body better than a bounding box measures a
-      // person, so the range estimate is upgraded when they exist.
-      if (track.distance) track.distanceFromPose = true;
     }
   }
 
-  /**
-   * Work out what is resting on what.
-   *
-   * A surface is a large, low object from a known family (table, worktop,
-   * shelf, floor…) or simply something that fills a lot of the frame and sits
-   * below the horizon. Anything whose centre falls inside a surface's box and
-   * which is much smaller is reported as "on" it — enough to answer "what is on
-   * the table" without any segmentation model.
-   */
-  _relations(records, frame) {
-    if (records.length < 2) return;
-    const SURFACES = ['table', 'desk', 'counter', 'worktop', 'work surface', 'shelf', 'shelving', 'floor', 'ground',
-      'bench', 'tray', 'board', 'plate', 'mat', 'bed', 'sofa', 'couch', 'chair', 'stool', 'step', 'platform',
-      'conveyor', 'belt', 'pallet', 'sink', 'hob', 'stove', 'dashboard', 'seat', 'tabletop'];
-    const area = (b) => Math.max(1, (b[2] - b[0]) * (b[3] - b[1]));
-    const frameArea = frame ? frame.width * frame.height : 1;
-    // A bus is big, but nothing rests on it. Only furniture, floors and the
-    // like can be a surface; a large vehicle, person or animal cannot.
-    const NOT_SURFACES = new Set(['vehicle', 'person', 'animal', 'insect', 'bird', 'sign', 'text', 'plant']);
-    const surfaces = records.filter((r) => {
-      if (NOT_SURFACES.has((r.category || '').toLowerCase())) return false;
-      const name = (r.noun || r.label || '').toLowerCase();
-      const named = SURFACES.some((s) => name.includes(s));
-      const big = area(r.box) > frameArea * 0.08;
-      return named || big;
-    });
-    for (const surface of surfaces) {
-      surface.supports = [];
-    }
-    for (const rec of records) {
-      const cx = (rec.box[0] + rec.box[2]) / 2;
-      const cy = (rec.box[1] + rec.box[3]) / 2;
-      let best = null;
-      for (const surface of surfaces) {
-        if (surface === rec) continue;
-        if (area(surface.box) < area(rec.box) * 1.8) continue;
-        const inside = cx > surface.box[0] && cx < surface.box[2] && cy > surface.box[1] && cy < surface.box[3];
-        if (inside && (!best || area(surface.box) < area(best.box))) best = surface;
-      }
-      if (best) {
-        rec.on = best.label;
-        best.supports.push(rec.label);
-      }
-    }
-    for (const surface of surfaces) {
-      if (surface.supports) surface.supports = [...new Set(surface.supports)].slice(0, 8);
-    }
-  }
-
-  _sceneCache(records, time) {
-    if (time - (this._sceneAt || 0) < 1800) return;
-    this._sceneAt = time;
-    try {
-      this.lastScene = inferScene({ objects: records, lighting: this.lastLighting, textLines: this.lastTexts });
-    } catch { /* descriptive only */ }
-  }
-
-  /* ---------------------------------------------------------------- *
+  /* ---------------------------------------------------------------- *\
    * Resolution
    * ---------------------------------------------------------------- */
 
+  /**
+   * One track → one answer. Order of authority for the label:
+   *   safety sign read off it  >  brand text  >  classifier refinement  >  detector class
+   */
   _record(track, time) {
-    const taught = track.taught;
-    const noun = taught?.label || track.refined || displayName(track.label || track.cls);
-    const rec = lookup(noun, { fuzzy: false }) || lookup(track.cls, { fuzzy: false });
+    const signLabel = track.sign && track.sign.tier >= 3 && (track.category === 'sign' || track.signRatio < 0.25)
+      ? track.sign.say
+      : null;
     const brand = track.brand || (track.text ? matchBrand(track.text) : null);
-    const label = taught?.label
-      || nameFor({ cls: track.cls, refined: track.refined, brand: this.settings.narrateBrands ? brand : null });
+    const label = signLabel || nameFor({ cls: track.cls, refined: track.refined, brand });
+    const rec = lookup(track.refined || track.cls, { fuzzy: false });
 
     let confidence = track.smoothScore;
-    if (taught) confidence = Math.max(confidence, taught.score);
-    else if (track.refined && track.refineConfidence) confidence = clamp(confidence * 0.6 + track.refineConfidence * 0.5, 0, 0.97);
+    if (track.refined && track.refineConfidence) confidence = clamp(confidence * 0.6 + track.refineConfidence * 0.5, 0, 0.97);
     if (brand) confidence = clamp(confidence * 1.05, 0, 0.98);
-
-    const tags = tagsFor(noun);
-    const hazard = this._hazard(track, tags);
 
     return {
       id: track.id,
       cls: track.cls,
-      noun: rec?.name || noun,
+      noun: rec?.name || track.refined || track.cls,
       label,
-      category: taught?.category || rec?.category || track.category || categoryOf(track.cls),
-      tier: Math.max(track.tier || 1, rec?.tier || 1, taught ? 3 : 1),
+      category: rec?.category || track.category || categoryOf(track.cls),
+      tier: Math.max(track.tier || 1, rec?.tier || 1),
       confidence,
       box: [...track.box],
-      attributes: track.attributes,
-      classifier: track.classifier,
-      refined: track.refined,
-      taught: taught ? { label: taught.label, score: taught.score, samples: taught.samples } : null,
-      distance: track.distance,
+      refined: track.refined || null,
+      classifier: track.classifier || null,
       text: track.text || null,
-      brand: brand ? { name: brand.name, sector: brand.sector, products: brand.products, exact: brand.exact } : null,
-      sign: track.sign || null,
-      pose: track.pose || null,
+      brand: brand ? { name: brand.name, sector: brand.sector, exact: brand.exact } : null,
+      sign: track.sign ? { kind: track.sign.kind, say: track.sign.say, tier: track.sign.tier } : null,
       posture: track.posture || null,
-      hands: track.hands || null,
-      gesture: track.hands?.[0]?.gesture?.name || null,
+      gesture: track.gesture || null,
       activity: track.activity || null,
-      motion: track.motion(Math.hypot(track.box[2] - track.box[0], track.box[3] - track.box[1])),
-      note: noteFor(noun) || '',
-      hazard,
-      tags: [...tags],
       firstSeen: track.firstSeen,
       age: time - track.firstSeen,
       hits: track.hits,
-      embeddingVec: track.embedding || null,
-      source: taught ? 'taught' : brand && this.settings.narrateBrands ? 'brand' : track.refined ? 'classifier' : 'detector'
+      source: signLabel ? 'sign' : brand ? 'brand' : track.refined ? 'classifier' : 'detector'
     };
   }
 
-  _hazard(track, tags) {
-    if (track.sign && track.sign.tier >= 3) {
-      return { kind: track.sign.kind, note: `${track.sign.say}${track.text ? `: “${track.text}”` : ''}` };
-    }
-    const hazards = ['hazard', 'electrical', 'hot', 'sharp', 'flammable', 'gas', 'biohazard', 'safety', 'medical'];
-    const hit = hazards.find((h) => tags.has(h));
-    if (!hit) return null;
-    const note = noteFor(track.refined || track.label || track.cls);
-    return { kind: hit, note: note || '' };
-  }
-
-  /* ---------------------------------------------------------------- *
+  /* ---------------------------------------------------------------- *\
    * Utilities
    * ---------------------------------------------------------------- */
 
@@ -611,37 +485,6 @@ export class Pipeline {
     return out;
   }
 
-  /** Crop for the UI / teach store thumbnails (canvas here is fine — it is rare). */
-  cropForDisplay(img, box, size = 96) {
-    const crop = this._crop(img, box, 0.05);
-    if (!crop) return null;
-    const scale = size / Math.max(crop.width, crop.height);
-    const c = document.createElement('canvas');
-    c.width = Math.round(crop.width * scale);
-    c.height = Math.round(crop.height * scale);
-    const src = document.createElement('canvas');
-    src.width = crop.width; src.height = crop.height;
-    src.getContext('2d').putImageData(crop, 0, 0);
-    const ctx = c.getContext('2d');
-    ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(src, 0, 0, c.width, c.height);
-    return c.toDataURL('image/jpeg', 0.6);
-  }
-
-  /** Store a named example so the object is recognised from now on. */
-  teachObject(record, label, { cropDataUrl = null } = {}) {
-    const embedding = record.embeddingVec || null;
-    if (!embedding) return null;
-    return this.teach.add({
-      label,
-      embedding,
-      category: categoryOf(label),
-      tags: record.tags || [],
-      note: noteFor(label),
-      crop: cropDataUrl
-    });
-  }
-
   info() {
     return {
       scanSize: this.scanSize,
@@ -654,11 +497,7 @@ export class Pipeline {
         ocr: this.ocr.info(),
         pose: this.pose.info()
       },
-      counts: this.stats,
-      taught: this.teach.examples.length,
-      scene: this.lastScene
+      counts: this.stats
     };
   }
 }
-
-export { BG };
