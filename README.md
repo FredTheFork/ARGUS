@@ -3,13 +3,16 @@
 ARGUS is an installable web app that turns a phone, tablet or laptop camera into
 an always-on visual assistant. It detects and names objects, works out their
 colour and material, reads text and brands off them, watches people move, paces
-distances, describes the scene, answers spoken questions, and does all of it
-locally — no frames, images or audio ever leave the handset.
+distances, describes the scene, and does all of it locally — no frames, images
+or audio ever leave the handset.
 
-It is built for a heads-up display: the overlay has a `glasses` style that grows
-the type and drops the detail for a screen a few centimetres from the eye, and
-every answer is available as speech, because you cannot read a HUD while carrying
-a box.
+**v2.1 — camera-only.** Point it at the world and that is the whole interface:
+every object seen is outlined and named on the feed, from the first frame it
+appears. The stage carries zero interactive elements — no buttons, no fields,
+no sheets — and the only surface the app can raise on its own is a hazard
+alert. The language, speech and install modules (`js/agent.js`,
+`js/speech.js`, `js/install.js`) remain in the tree, covered by their own
+tests, but this build does not use them.
 
 ```
         camera ──► detector (tiled) ──► tracker ──► fusion ──► records ─┬─► HUD
@@ -43,49 +46,30 @@ The vocabulary is the sum of those layers: **928 curated objects, 1 802 aliases,
 1 000 ImageNet classes, 320 brands, 57 materials and 157 named colours — 3 304
 recognisable names**, extended at runtime by anything you teach it.
 
----
+## What the interface does
 
-## Commands you can say or type
+Nothing to learn. ARGUS runs the detector continuously, and each tracked
+object gets corner brackets in its category colour with its name written
+alongside — *mug*, *Samsung phone*, *fire exit sign* — the moment it is seen.
+The classifier, text and brand reading and pose modules run in the background
+and sharpen the names as evidence lands. A hazardous object (live conductors,
+a flammable sign, a blade) is named in red and raises the one proactive
+surface in the app: a hazard alert. Alerts are debounced per object, so a
+kettle in view nags once, not forever.
 
-```
-what is this · describe the scene · what am I looking at
-what colour is the mug · what is it made of
-where are my keys · how far is the bus · which way
-read that sign · what does it say · how many bottles
-who is that · what are they doing · is anything dangerous
-teach this as my inhaler · forget my mug · what have you learned
-watch for dogs · stop watching for dogs · what are you watching
-have you seen a drill before · have you seen this before
-what else looks like this · what is on the table
-find my keys · look for the van · stop looking for dogs
-lock on to the van · unlock · capture · pause · resume
-mute · unmute · detail mode · performance mode · status · modules · help
-```
-
-**Guided search.** Ask for something that is not in view and ARGUS stops
-guessing: it tracks the request frame by frame and calls the correction —
-"keys, about 2 metres — turn left", "found the keys, dead ahead". It grows
-quieter as you get there rather than repeating itself.
-
-Type them in the query bar, or open the microphone and speak. ARGUS also speaks
-first when it matters: hazards and safety signage, watchlist matches, objects
-approaching, new objects of interest, and scene changes in chatty mode — and it
-stays quiet about the mug that has been on the desk all afternoon.
+There is nothing to tap, drag or type. Boot is the only other screen: it
+reports honest progress, and on failure says what failed with a working Retry,
+or the bundled demo feed.
 
 ---
 
-## Teaching it your own things
+## Teaching and memory (modules retained, surfaces removed in v2.1)
 
-Public models do not know your inhaler, your keys, or the difference between
-your two black mugs. Point ARGUS at the object, tap it, choose **Teach**, and
-name it. The 1280-d fingerprint is stored; every later frame is matched against
-it by cosine similarity, so the object is recognised from new angles and in
-different light. Taught labels outrank every model answer, because you are
-ground truth.
-
-Memory records every observation with counts, first and last sighting, colours
-and materials seen. It can be exported and imported as JSON, and forgotten
-entirely with one button.
+The appearance-memory and few-shot teaching layers are unchanged internally:
+every observation still keeps a quantised 1280-d centroid, and taught labels
+still outrank every model answer. What v2.1 removes is the furniture — the
+teach sheet, the memory sheet, the query bar. Objects taught in an earlier
+version and imported into the device's storage are still recognised and named.
 
 ---
 
@@ -93,7 +77,7 @@ entirely with one button.
 
 ```bash
 node tools/serve.mjs          # http://localhost:8080
-npm test                      # 243 headless checks, no browser required
+npm test                      # 244 headless checks, no browser required
 npm run verify:models         # run the real models over a real photograph
 ```
 
@@ -132,12 +116,14 @@ analysis, tracker, memory, language, fusion relations), **assets** (every import
 resolves to a real export, every shipped file exists, model digests match
 `models/manifest.json`, version strings stay in sync), **boot** (the real
 `app.js` start-up under a DOM that refuses the camera and blocks the runtime —
-proving failures are reported instead of thrown, and that a successful boot
-really does dismiss the loading screen) and **pwa** (the service worker
-evaluated against a fake Cache API over the real repository files — precache,
-verified payloads, cache-first vs stale-while-revalidate, range requests,
-offline navigation, background model fill and purge — plus the inline boot
-watchdog in `index.html`).
+proving failures are reported instead of thrown, that a successful boot
+really does dismiss the loading screen, and the v2.1 contract: a stage with
+zero interactive elements, outlines on the first frame, hazards as the only
+proactive channel, and agent/speech/install shipped but unused) and **pwa**
+(the service worker evaluated against a fake Cache API over the real repository
+files — precache, verified payloads, cache-first vs stale-while-revalidate,
+range requests, offline navigation, background model fill and purge — plus the
+inline boot watchdog in `index.html`).
 
 At runtime the same manifest is checked in the other direction: each model is
 hashed as it loads and compared with `models/manifest.json`, so "the fetch

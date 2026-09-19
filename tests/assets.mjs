@@ -145,10 +145,9 @@ const referenced = new Set([
   ...[...appSrc.matchAll(/bind\('([\w-]+)'/g)].map((m) => m[1])
 ]);
 const htmlIds = new Set([...html.matchAll(/id="([\w-]+)"/g)].map((m) => m[1]));
-// install-btn and friends are injected by ui.js at runtime, so they are not in
-// the static HTML on purpose.
-const dynamic = new Set(['install-btn']);
-const missingIds = [...referenced].filter((id) => !htmlIds.has(id) && !dynamic.has(id));
+// v2.1 injects no elements at runtime: every id the app or the UI asks for
+// must exist in the static markup.
+const missingIds = [...referenced].filter((id) => !htmlIds.has(id));
 test(`app/ui element ids (${referenced.size})`, missingIds.length === 0, missingIds.join(', '));
 
 section('mobile boot contract');
