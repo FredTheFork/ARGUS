@@ -20,7 +20,7 @@
  *     crops match what the recogniser was trained on.
  */
 
-import { toTensor, warpQuad, rotate180, boxArea } from './core.js';
+import { toTensor, warpQuad, rotate180, boxArea, scratch, ctx2d, putFrame } from './core.js';
 import { OCR_CHARSET, OCR_SPACE_INDEX } from './data/ocrchars.js';
 import { matchBrand, matchSign } from './kb.js';
 
@@ -70,10 +70,10 @@ export class Ocr {
    * @param {boolean} opts.brands         attach brand/sign matches
    * @returns {Promise<{lines:Array, ms:number}>}
    */
-  async read(img, { minConfidence = 0.55, maxLines = 24, brands = true, orientation = true } = {}) {
+  async read(img, { minConfidence = 0.55, maxLines = 24, brands = true, orientation = true, maxSide = 512 } = {}) {
     if (!this.ready) return { lines: [], ms: 0 };
     const started = performance.now();
-    const boxes = await this._detect(img);
+    const boxes = await this._detect(img, { maxSide });
     const lines = [];
     for (const region of boxes.slice(0, maxLines)) {
       const line = await this._recognise(img, region, { orientation });
@@ -112,11 +112,13 @@ export class Ocr {
    * Stage 1 — detection
    * ---------------------------------------------------------------- */
 
-  async _detect(img) {
-    const limit = 736;
-    const minSide = Math.min(img.width, img.height);
-    let scale = minSide < limit ? limit / minSide : 1;
-    if (Math.max(img.width, img.height) * scale > 2000) scale = 2000 / Math.max(img.width, img.height);
+  async _detect(img, { maxSide = 512 } = {}) {
+    // Cap the DBNet input on its LONG edge and never upscale a camera frame.
+    // The old policy scaled every frame until its short side reached 736 px —
+    // nearly 4x the pixel area of a 512 cap, for text a phone camera rarely
+    // holds. Small crops (readBox) still upscale to a workable minimum.
+    const longest = Math.max(img.width, img.height);
+    const scale = longest < 320 ? 320 / longest : Math.min(1, maxSide / longest);
     const w = Math.max(32, Math.round(img.width * scale / 32) * 32);
     const h = Math.max(32, Math.round(img.height * scale / 32) * 32);
     const resized = this._resize(img, w, h);
@@ -305,29 +307,23 @@ export class Ocr {
   }
 
   _resize(img, w, h) {
-    const c = document.createElement('canvas');
-    c.width = w; c.height = h;
-    const ctx = c.getContext('2d', { willReadFrequently: true });
-    const src = document.createElement('canvas');
-    src.width = img.width; src.height = img.height;
-    src.getContext('2d').putImageData(img, 0, 0);
+    // Pooled canvases — DBNet runs a few times a second; a fresh backing
+    // store per pass is exactly the allocation churn a phone does not need.
+    const c = scratch('ocr-resize', w, h);
+    const ctx = ctx2d(c);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(src, 0, 0, w, h);
+    ctx.drawImage(putFrame(img, 'ocr-src'), 0, 0, w, h);
     return ctx.getImageData(0, 0, w, h);
   }
 
   /** Right-pad with mid grey so a short crop fills the recogniser's canvas. */
   _padTo(img, w, h) {
-    const c = document.createElement('canvas');
-    c.width = w; c.height = h;
-    const ctx = c.getContext('2d', { willReadFrequently: true });
+    const c = scratch(`ocr-pad-${w}x${h}`, w, h);
+    const ctx = ctx2d(c);
     ctx.fillStyle = 'rgb(127,127,127)';
     ctx.fillRect(0, 0, w, h);
-    const src = document.createElement('canvas');
-    src.width = img.width; src.height = img.height;
-    src.getContext('2d').putImageData(img, 0, 0);
-    ctx.drawImage(src, 0, 0);
+    ctx.drawImage(putFrame(img, 'ocr-src'), 0, 0);
     return ctx.getImageData(0, 0, w, h);
   }
 

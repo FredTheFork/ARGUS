@@ -106,9 +106,14 @@ export class Classifier {
     const ctx = c.getContext('2d', { willReadFrequently: true });
     ctx.fillStyle = 'rgb(127,127,127)';
     ctx.fillRect(0, 0, INPUT, INPUT);
-    const src = document.createElement('canvas');
-    src.width = crop.width; src.height = crop.height;
-    src.getContext('2d').putImageData(crop, 0, 0);
+    // One reused source canvas per crop size, not a fresh canvas per call.
+    if (!this._srcPool) this._srcPool = new Map();
+    const key = `${crop.width}x${crop.height}`;
+    let src = this._srcPool.get(key);
+    if (!src) { src = document.createElement('canvas'); this._srcPool.set(key, src); }
+    if (src.width !== crop.width) src.width = crop.width;
+    if (src.height !== crop.height) src.height = crop.height;
+    src.getContext('2d', { willReadFrequently: true }).putImageData(crop, 0, 0);
     const scale = INPUT / size;
     const w = Math.round(crop.width * scale);
     const h = Math.round(crop.height * scale);

@@ -164,7 +164,9 @@ test('boot() ran and bound the HUD', !!app.state.settings && !!app.state.hud, ap
 test('failure is reported in the interface', bootError && bootError.hidden === false, bootDetail?.textContent?.slice(0, 80));
 test('interface offers the demo feed', demoBtn && demoBtn.hidden === false);
 test('no unhandled rejections during boot', errors.length === 0, errors.map((e) => e?.message).join('; '));
-test('runtime config is in force', app.state.settings.scanSize === 416 && app.state.settings.minConfidence > 0, `scan ${app.state.settings.scanSize}, conf ${app.state.settings.minConfidence}`);
+const { CONFIG: appConfig } = await import('../js/config.js');
+test('runtime config is in force', app.state.settings.scanSize === appConfig.scanSize && app.state.settings.minConfidence > 0,
+  `scan ${app.state.settings.scanSize} (config ${appConfig.scanSize}), conf ${app.state.settings.minConfidence}`);
 test('element index covers index.html ids', [...html.matchAll(/id="([\w-]+)"/g)].every((m) => elements.has(m[1])));
 
 // The HUD is built while #stage is hidden, so there is no box to measure. It
